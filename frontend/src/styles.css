@@ -25,7 +25,7 @@
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-            background: #1a1a2e url('https://t.alcy.cc/fj') center/cover no-repeat fixed;
+            background: linear-gradient(135deg, #eaf3ff 0%, #f7fbff 42%, #eef7f2 100%);
             color: #333;
             line-height: 1.6;
             min-height: 100vh;
@@ -522,6 +522,35 @@
         @keyframes fadeInUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
         .page-loading { max-width: 1000px; margin: 0 auto; padding: 36px 16px; }
+        .toast-host { position: fixed; top: 68px; right: 16px; z-index: 3000; display: flex; flex-direction: column; gap: 10px; max-width: min(360px, calc(100vw - 32px)); }
+        .toast { display: inline-flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,.96); border: 1px solid #e5e7eb; box-shadow: 0 8px 24px rgba(15,23,42,.14); color: #334155; font-size: .88rem; animation: toastIn .18s ease both; }
+        .toast-success { border-color: #bbf7d0; color: #166534; }
+        .toast-error { border-color: #fecaca; color: #991b1b; }
+        @keyframes toastIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+        .mini-busy { font-size: .75rem; color: #2563eb; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 999px; padding: 2px 8px; }
+        .skeleton-row { display: flex !important; align-items: flex-start; gap: 14px; pointer-events: none; }
+        .skeleton-avatar, .skeleton-line, .skeleton-search { position: relative; overflow: hidden; background: #e9eef6; display: block; }
+        .skeleton-avatar { width: 42px; height: 42px; border-radius: 50%; flex: 0 0 auto; }
+        .skeleton-main { flex: 1; min-width: 0; display: grid; gap: 10px; }
+        .skeleton-line { height: 12px; border-radius: 999px; margin-bottom: 10px; }
+        .skeleton-line.big { height: 24px; margin-bottom: 18px; }
+        .w45 { width: 45%; } .w70 { width: 70%; } .w95 { width: 95%; }
+        .skeleton-search { height: 68px; border-radius: 8px; margin-bottom: 16px; border: 1px solid rgba(255,255,255,.6); }
+        .skeleton-avatar::after, .skeleton-line::after, .skeleton-search::after { content: ''; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, rgba(255,255,255,.7), transparent); animation: shimmer 1.25s ease-in-out infinite; }
+        @keyframes shimmer { 100% { transform: translateX(100%); } }
+        .channel-grid { padding: 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+        .channel-card { display: flex; gap: 12px; padding: 16px; border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; text-decoration: none; color: #1f2937; transition: var(--transition); }
+        .channel-card:hover { transform: translateY(-2px); border-color: #bfdbfe; box-shadow: 0 8px 24px rgba(74,144,217,.13); }
+        .channel-icon { width: 42px; height: 42px; border-radius: 12px; background: #eff6ff; color: #2563eb; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+        .channel-card h3 { font-size: 1rem; margin-bottom: 4px; }
+        .channel-card p { color: #6b7280; font-size: .86rem; margin-bottom: 6px; }
+        .channel-card span { color: #94a3b8; font-size: .78rem; }
+        .channel-hero h1 { font-size: 1.6rem; margin: 8px 0 4px; color: #111827; }
+        .channel-hero p { color: #64748b; }
+        .channel-pill { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px; background: #eff6ff; color: #2563eb; font-size: .76rem; font-weight: 700; }
+        .source-link { display: inline-flex; margin-top: 10px; color: #2563eb; text-decoration: none; }
+        .channel-create, .channel-post-create { display: grid; grid-template-columns: 1fr 1fr .8fr auto; align-items: start; }
+        .channel-desc { grid-column: 1 / -1; min-height: 88px; }
         .loading-card {
             display: inline-flex;
             align-items: center;
@@ -581,7 +610,7 @@
             .send-code-btn { padding-left: 12px; padding-right: 12px; }
             .admin-hero { align-items: flex-start; flex-direction: column; padding: 16px; }
             .admin-stat-grid, .admin-grid { grid-template-columns: 1fr; }
-            .admin-toolbar, .admin-create, .donor-create { display: flex; flex-direction: column; }
+            .admin-toolbar, .admin-create, .donor-create, .channel-create, .channel-post-create { display: flex; flex-direction: column; }
             .admin-row { align-items: flex-start; flex-direction: column; }
             .admin-actions { justify-content: flex-start; }
             .admin-row p { white-space: normal; }

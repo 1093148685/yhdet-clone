@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import os
+import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -151,6 +152,46 @@ def init_db() -> None:
                 key TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS channels(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                slug TEXT UNIQUE NOT NULL,
+                description TEXT DEFAULT '',
+                mode TEXT NOT NULL DEFAULT 'manual',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                source_type TEXT DEFAULT '',
+                endpoint_url TEXT DEFAULT '',
+                auth_type TEXT DEFAULT 'none',
+                auth_secret_ref TEXT DEFAULT '',
+                mapping_json TEXT DEFAULT '{}',
+                last_sync_at TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS channel_posts(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                author_name TEXT DEFAULT '管理员',
+                external_id TEXT DEFAULT '',
+                external_url TEXT DEFAULT '',
+                source_payload_json TEXT DEFAULT '{}',
+                views INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(channel_id, external_id),
+                FOREIGN KEY(channel_id) REFERENCES channels(id)
+            );
+            CREATE TABLE IF NOT EXISTS channel_comments(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_post_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(channel_post_id) REFERENCES channel_posts(id),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             """
         )
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
@@ -261,6 +302,26 @@ class AdminDonorIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     amount: str = Field(min_length=1, max_length=80)
     donated_at: str = Field(min_length=1, max_length=40)
+
+
+class ChannelIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    slug: str = Field(min_length=1, max_length=80)
+    description: str | None = Field(default='', max_length=1000)
+    mode: str = 'manual'
+    enabled: bool = True
+    source_type: str | None = ''
+    endpoint_url: str | None = ''
+    auth_type: str | None = 'none'
+    auth_secret_ref: str | None = ''
+    mapping_json: str | None = '{}'
+
+
+class ChannelPostIn(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=20000)
+    author_name: str | None = Field(default='管理员', max_length=80)
+    external_url: str | None = Field(default='', max_length=500)
 
 
 @app.on_event("startup")
@@ -703,6 +764,247 @@ def admin_delete_donor(donor_id: int, authorization: str | None = Header(default
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="捐赠记录不存在")
     return {"ok": True}
+
+
+def channel_to_dict(c: sqlite3.Row, post_count: int | None = None) -> dict[str, Any]:
+    return {
+        "id": c["id"],
+        "name": c["name"],
+        "slug": c["slug"],
+        "description": c["description"] or "",
+        "mode": c["mode"],
+        "enabled": bool(c["enabled"]),
+        "source_type": c["source_type"] or "",
+        "endpoint_url": c["endpoint_url"] or "",
+        "auth_type": c["auth_type"] or "none",
+        "auth_secret_ref": "***" if c["auth_secret_ref"] else "",
+        "mapping_json": c["mapping_json"] or "{}",
+        "last_sync_at": c["last_sync_at"] or "",
+        "created_at": c["created_at"],
+        "updated_at": c["updated_at"],
+        "post_count": post_count if post_count is not None else 0,
+    }
+
+
+def channel_post_to_dict(p: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": p["id"],
+        "channel_id": p["channel_id"],
+        "channel_name": p["channel_name"] if "channel_name" in p.keys() else "",
+        "channel_slug": p["channel_slug"] if "channel_slug" in p.keys() else "",
+        "title": p["title"],
+        "content": p["content"],
+        "preview": p["content"],
+        "author_name": p["author_name"] or "管理员",
+        "external_url": p["external_url"] or "",
+        "views": p["views"],
+        "comments": p["comment_count"] if "comment_count" in p.keys() else 0,
+        "time": p["created_at"],
+    }
+
+
+def get_channel(conn: sqlite3.Connection, id_or_slug: str) -> sqlite3.Row | None:
+    if id_or_slug.isdigit():
+        return conn.execute("SELECT * FROM channels WHERE id=?", (int(id_or_slug),)).fetchone()
+    return conn.execute("SELECT * FROM channels WHERE slug=?", (id_or_slug,)).fetchone()
+
+
+def clean_slug(slug: str) -> str:
+    value = ''.join(ch.lower() if ch.isalnum() else '-' for ch in slug.strip())
+    value = '-'.join(part for part in value.split('-') if part)
+    if not value:
+        raise HTTPException(status_code=400, detail="slug 无效")
+    return value[:80]
+
+
+@app.get("/api/channels")
+def list_channels():
+    init_db()
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT ch.*, (SELECT COUNT(*) FROM channel_posts cp WHERE cp.channel_id=ch.id) AS post_count
+            FROM channels ch WHERE ch.enabled=1 ORDER BY ch.id DESC
+            """
+        ).fetchall()
+    return {"items": [channel_to_dict(r, r["post_count"]) for r in rows]}
+
+
+@app.get("/api/channels/{id_or_slug}")
+def channel_detail(id_or_slug: str):
+    with db() as conn:
+        ch = get_channel(conn, id_or_slug)
+        if not ch or not ch["enabled"]:
+            raise HTTPException(status_code=404, detail="频道不存在")
+        count = conn.execute("SELECT COUNT(*) FROM channel_posts WHERE channel_id=?", (ch["id"],)).fetchone()[0]
+    return {"channel": channel_to_dict(ch, count)}
+
+
+@app.get("/api/channels/{id_or_slug}/posts")
+def channel_posts(id_or_slug: str):
+    with db() as conn:
+        ch = get_channel(conn, id_or_slug)
+        if not ch or not ch["enabled"]:
+            raise HTTPException(status_code=404, detail="频道不存在")
+        rows = conn.execute(
+            """
+            SELECT cp.*, ch.name AS channel_name, ch.slug AS channel_slug,
+                   (SELECT COUNT(*) FROM channel_comments cc WHERE cc.channel_post_id=cp.id) AS comment_count
+            FROM channel_posts cp JOIN channels ch ON ch.id=cp.channel_id
+            WHERE cp.channel_id=? ORDER BY cp.id DESC LIMIT 50
+            """,
+            (ch["id"],),
+        ).fetchall()
+    return {"channel": channel_to_dict(ch), "items": [channel_post_to_dict(r) for r in rows]}
+
+
+@app.get("/api/channel_posts/{post_id}")
+def channel_post_detail(post_id: int):
+    with db() as conn:
+        conn.execute("UPDATE channel_posts SET views=views+1 WHERE id=?", (post_id,))
+        row = conn.execute(
+            """
+            SELECT cp.*, ch.name AS channel_name, ch.slug AS channel_slug,
+                   (SELECT COUNT(*) FROM channel_comments cc WHERE cc.channel_post_id=cp.id) AS comment_count
+            FROM channel_posts cp JOIN channels ch ON ch.id=cp.channel_id WHERE cp.id=? AND ch.enabled=1
+            """,
+            (post_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="频道内容不存在")
+        comments = conn.execute(
+            "SELECT cc.*, u.username, u.avatar, u.role, u.role_label FROM channel_comments cc JOIN users u ON u.id=cc.user_id WHERE cc.channel_post_id=? ORDER BY cc.id ASC",
+            (post_id,),
+        ).fetchall()
+    return {"post": channel_post_to_dict(row), "comments": [{"id": c["id"], "user_id": c["user_id"], "content": c["content"], "time": c["created_at"], "author": c["username"], "avatar": c["avatar"] or DEFAULT_AVATAR, "role": c["role_label"] or ("超管" if c["role"] == "admin" else "")} for c in comments]}
+
+
+@app.post("/api/channel_posts/{post_id}/comments")
+def add_channel_comment(post_id: int, payload: CommentIn, authorization: str | None = Header(default=None)):
+    user = require_user(current_user(authorization))
+    with db() as conn:
+        exists = conn.execute("SELECT id FROM channel_posts WHERE id=?", (post_id,)).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="频道内容不存在")
+        cur = conn.execute("INSERT INTO channel_comments(channel_post_id,user_id,content,created_at) VALUES(?,?,?,?)", (post_id, user["id"], payload.content.strip(), now()))
+    return {"id": cur.lastrowid}
+
+
+@app.get("/api/admin/channels")
+def admin_channels(authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT ch.*, (SELECT COUNT(*) FROM channel_posts cp WHERE cp.channel_id=ch.id) AS post_count
+            FROM channels ch ORDER BY ch.id DESC
+            """
+        ).fetchall()
+        posts = conn.execute(
+            """
+            SELECT cp.*, ch.name AS channel_name, ch.slug AS channel_slug,
+                   (SELECT COUNT(*) FROM channel_comments cc WHERE cc.channel_post_id=cp.id) AS comment_count
+            FROM channel_posts cp JOIN channels ch ON ch.id=cp.channel_id ORDER BY cp.id DESC LIMIT 100
+            """
+        ).fetchall()
+    return {"items": [channel_to_dict(r, r["post_count"]) for r in rows], "posts": [channel_post_to_dict(p) for p in posts]}
+
+
+@app.post("/api/admin/channels")
+def admin_create_channel(payload: ChannelIn, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    if payload.mode not in {"manual", "api"}:
+        raise HTTPException(status_code=400, detail="频道模式只能是 manual 或 api")
+    slug = clean_slug(payload.slug)
+    with db() as conn:
+        try:
+            cur = conn.execute(
+                """INSERT INTO channels(name,slug,description,mode,enabled,source_type,endpoint_url,auth_type,auth_secret_ref,mapping_json,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (payload.name.strip(), slug, (payload.description or '').strip(), payload.mode, 1 if payload.enabled else 0, (payload.source_type or '').strip(), (payload.endpoint_url or '').strip(), (payload.auth_type or 'none').strip(), (payload.auth_secret_ref or '').strip(), payload.mapping_json or '{}', now(), now()),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="频道 slug 已存在")
+    return {"id": cur.lastrowid}
+
+
+@app.put("/api/admin/channels/{channel_id}")
+def admin_update_channel(channel_id: int, payload: ChannelIn, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    if payload.mode not in {"manual", "api"}:
+        raise HTTPException(status_code=400, detail="频道模式只能是 manual 或 api")
+    slug = clean_slug(payload.slug)
+    with db() as conn:
+        try:
+            cur = conn.execute(
+                """UPDATE channels SET name=?, slug=?, description=?, mode=?, enabled=?, source_type=?, endpoint_url=?, auth_type=?, auth_secret_ref=?, mapping_json=?, updated_at=? WHERE id=?""",
+                (payload.name.strip(), slug, (payload.description or '').strip(), payload.mode, 1 if payload.enabled else 0, (payload.source_type or '').strip(), (payload.endpoint_url or '').strip(), (payload.auth_type or 'none').strip(), (payload.auth_secret_ref or '').strip(), payload.mapping_json or '{}', now(), channel_id),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="频道 slug 已存在")
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="频道不存在")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/channels/{channel_id}")
+def admin_delete_channel(channel_id: int, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    with db() as conn:
+        conn.execute("DELETE FROM channel_comments WHERE channel_post_id IN (SELECT id FROM channel_posts WHERE channel_id=?)", (channel_id,))
+        conn.execute("DELETE FROM channel_posts WHERE channel_id=?", (channel_id,))
+        cur = conn.execute("DELETE FROM channels WHERE id=?", (channel_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="频道不存在")
+    return {"ok": True}
+
+
+@app.post("/api/admin/channels/{channel_id}/posts")
+def admin_create_channel_post(channel_id: int, payload: ChannelPostIn, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    with db() as conn:
+        ch = conn.execute("SELECT * FROM channels WHERE id=?", (channel_id,)).fetchone()
+        if not ch:
+            raise HTTPException(status_code=404, detail="频道不存在")
+        cur = conn.execute(
+            "INSERT INTO channel_posts(channel_id,title,content,author_name,external_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            (channel_id, payload.title.strip(), payload.content.strip(), (payload.author_name or '管理员').strip(), (payload.external_url or '').strip(), now(), now()),
+        )
+    return {"id": cur.lastrowid}
+
+
+@app.delete("/api/admin/channel_posts/{post_id}")
+def admin_delete_channel_post(post_id: int, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    with db() as conn:
+        conn.execute("DELETE FROM channel_comments WHERE channel_post_id=?", (post_id,))
+        cur = conn.execute("DELETE FROM channel_posts WHERE id=?", (post_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="频道内容不存在")
+    return {"ok": True}
+
+
+@app.post("/api/admin/channels/{channel_id}/test-source")
+def admin_test_channel_source(channel_id: int, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    with db() as conn:
+        ch = conn.execute("SELECT * FROM channels WHERE id=?", (channel_id,)).fetchone()
+        if not ch:
+            raise HTTPException(status_code=404, detail="频道不存在")
+    if ch["mode"] != "api" or not ch["endpoint_url"]:
+        return {"ok": False, "message": "请先配置接口模式和接口地址"}
+    return {"ok": True, "message": "接口配置已保存。当前版本先支持手动录入和后续同步扩展。"}
+
+
+@app.post("/api/admin/channels/{channel_id}/sync")
+def admin_sync_channel(channel_id: int, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    with db() as conn:
+        ch = conn.execute("SELECT * FROM channels WHERE id=?", (channel_id,)).fetchone()
+        if not ch:
+            raise HTTPException(status_code=404, detail="频道不存在")
+        conn.execute("UPDATE channels SET last_sync_at=?, updated_at=? WHERE id=?", (now(), now(), channel_id))
+    return {"ok": True, "message": "已记录同步请求。接口抓取映射将在下一步接入具体数据源。", "created": 0}
 
 
 @app.get("/api/games")
