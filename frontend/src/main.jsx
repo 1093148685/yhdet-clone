@@ -6,7 +6,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || ''
 const fallbackAvatar = '/static/avatar.svg'
 const tokenKey = 'yhdet_token'
 const avatarFallbacks = ['/static/avatar.svg']
-const defaultSite = { site_name: '易聊社区', site_logo: '', default_avatar: fallbackAvatar }
+const defaultSite = { site_name: '泓聊社区', site_logo: '', default_avatar: fallbackAvatar }
 function safeAvatar(src) {
   if (!src || typeof src !== 'string') return avatarFallbacks[0]
   if (src.includes('robots.txt') || src.includes('t.alcy.cc')) return avatarFallbacks[0]
@@ -113,7 +113,7 @@ function Nav({ me, setMe, path, site = defaultSite }) {
   const logout = () => { localStorage.removeItem(tokenKey); localStorage.removeItem('yhdet_user'); setMe(null); navigate('/') }
   return <nav className="navbar">
     <div className="navbar-inner">
-      <a href="/" className="navbar-brand"><span className="logo-icon">{site.site_logo ? <img src={safeAvatar(site.site_logo)} alt="" /> : <i className="fas fa-comments" />}</span>{site.site_name || '易聊社区'}</a>
+      <a href="/" className="navbar-brand"><span className="logo-icon">{site.site_logo ? <img src={safeAvatar(site.site_logo)} alt="" /> : <i className="fas fa-comments" />}</span>{site.site_name || '泓聊社区'}</a>
       <div className="navbar-menu">
         <a href="/" className={cls('/')}><i className="fas fa-home" /> 首页</a>
         <a href="/channels" className={cls('/channels')}><i className="fas fa-broadcast-tower" /> 频道</a>
@@ -240,7 +240,7 @@ function SiteFooter({ site = defaultSite }) {
   const stats = site.stats || {}
   const runtime = site.runtime || {}
   return <footer className="footer site-footer">
-    <div className="footer-brand">{site.site_name || '易聊社区'}</div>
+    <div className="footer-brand">{site.site_name || '泓聊社区'}</div>
     <div className="footer-meta">
       {runtime.uptime_text && <span><i className="fas fa-signal" /> 已运行 {runtime.uptime_text}</span>}
       {runtime.started_at && <span><i className="far fa-clock" /> 启动 {displayTime(runtime.started_at)}</span>}
@@ -425,7 +425,7 @@ function CaptchaBox({ value, onChange }) {
 
 function AuthPage({ mode, setMe, site = defaultSite }) {
   const isLogin = mode === 'login'
-  useEffect(() => { document.title = `${isLogin ? '登录' : '注册'} - ${(site.site_name || '易聊社区')}` }, [isLogin, site.site_name])
+  useEffect(() => { document.title = `${isLogin ? '登录' : '注册'} - ${(site.site_name || '泓聊社区')}` }, [isLogin, site.site_name])
   const [form, setForm] = useState({ username: '', email: '', email_code: '', password: '', captcha: '' })
   const [err, setErr] = useState('')
   const [hint, setHint] = useState('')
@@ -462,7 +462,7 @@ function AuthPage({ mode, setMe, site = defaultSite }) {
   }
   return <div className="auth-page">
     <div className={isLogin ? 'login-card' : 'register-card'}>
-      <div className={isLogin ? 'login-header' : 'register-header'}><h1>{isLogin ? '登录' : '注册'}</h1><p>{site.site_name || '易聊社区'}</p></div>
+      <div className={isLogin ? 'login-header' : 'register-header'}><h1>{isLogin ? '登录' : '注册'}</h1><p>{site.site_name || '泓聊社区'}</p></div>
       {err && <div className="alert alert-error">{err}</div>}
       <form onSubmit={submit}>
         <div className="form-group"><label className="form-label" htmlFor="username">用户名</label><input id="username" type="text" className="form-input" placeholder="请输入用户名" required value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} /></div>
@@ -727,7 +727,7 @@ function PostDetail({ id, me }) {
   const [editorOpen, setEditorOpen] = useState(false)
   const [detailReady, setDetailReady] = useState(false)
   const editorRef = useRef(null)
-  const load = (silent = false) => api(`/api/posts/${id}`).then(d => { setData(d); document.title = `${d.post.title} - 易聊社区` }).catch(e => { if (!silent) setErr(e.message) })
+  const load = (silent = false) => api(`/api/posts/${id}`).then(d => { setData(d); document.title = `${d.post.title} - 泓聊社区` }).catch(e => { if (!silent) setErr(e.message) })
   const handleTopicEvent = useMemo(() => {
     let timer = null
     return msg => {
@@ -745,7 +745,7 @@ function PostDetail({ id, me }) {
   useEffect(() => {
     if (composerMode === 'edit' && draftKey) localStorage.setItem(draftKey, content)
   }, [composerMode, draftKey, content])
-  useEffect(() => { let alive = true; setData(null); setDetailReady(false); setErr(''); setReplyingTo(null); setEditingComment(null); setComposerMode('reply'); setEditorOpen(false); const started = Date.now(); api(`/api/posts/${id}`).then(d => { if (!alive) return; const wait = Math.max(260 - (Date.now() - started), 0); setTimeout(() => { if (alive) { setData(d); setDetailReady(true); document.title = `${d.post.title} - 易聊社区` } }, wait) }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
+  useEffect(() => { let alive = true; setData(null); setDetailReady(false); setErr(''); setReplyingTo(null); setEditingComment(null); setComposerMode('reply'); setEditorOpen(false); const started = Date.now(); api(`/api/posts/${id}`).then(d => { if (!alive) return; const wait = Math.max(260 - (Date.now() - started), 0); setTimeout(() => { if (alive) { setData(d); setDetailReady(true); document.title = `${d.post.title} - 泓聊社区` } }, wait) }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
   function highlightComment(commentId) {
     const el = document.getElementById(`comment-${commentId}`)
     if (!el) return
@@ -896,7 +896,7 @@ function UserPage({ id, me, setMe }) {
   const [showSentComments, setShowSentComments] = useState(true)
   const isMe = me && String(me.id) === String(id)
   const fetchUser = (pp = 1, cp = 1, scp = 1) => api(`/api/users/${id}?posts_page=${pp}&comments_page=${cp}&sent_comments_page=${scp}&page_size=10`)
-  useEffect(() => { let alive = true; setData(null); setPostsPage(1); setCommentsPage(1); setSentCommentsPage(1); fetchUser(1,1,1).then(d => { if (alive) { setData(d); document.title = `${d.user.username} 的主页 - 易聊社区`; if (location.hash === '#comments') setShowComments(true) } }); return () => { alive = false } }, [id])
+  useEffect(() => { let alive = true; setData(null); setPostsPage(1); setCommentsPage(1); setSentCommentsPage(1); fetchUser(1,1,1).then(d => { if (alive) { setData(d); document.title = `${d.user.username} 的主页 - 泓聊社区`; if (location.hash === '#comments') setShowComments(true) } }); return () => { alive = false } }, [id])
   useEffect(() => { if (!isMe) return; const t = setInterval(() => fetchUser(1,1,1).then(d => setData(old => old ? { ...old, unread_notifications: d.unread_notifications } : d)).catch(()=>{}), 5000); return () => clearInterval(t) }, [id, isMe])
   if (!data) return <DetailSkeleton />
   const u = data.user
@@ -943,7 +943,7 @@ function UserPage({ id, me, setMe }) {
 
 function SimpleSection({ type }) {
   const [data, setData] = useState(null)
-  useEffect(() => { document.title = `${type === 'games' ? '小游戏' : '音乐'} - 易聊社区`; api(`/api/${type}`).then(setData) }, [type])
+  useEffect(() => { document.title = `${type === 'games' ? '小游戏' : '音乐'} - 泓聊社区`; api(`/api/${type}`).then(setData) }, [type])
   return <div className="main-content"><div className="card"><div className="card-header"><h3><i className={`fas ${type === 'games' ? 'fa-gamepad' : 'fa-music'}`} /> {type === 'games' ? '小游戏' : '音乐'}</h3></div><div className="card-body"><div className="alert alert-info">{data?.message || '加载中...'}</div><div className="user-grid">{data?.items?.map(x => <div className="user-card" key={x}><div className="empty-state" style={{ padding: 10 }}><i className={`fas ${type === 'games' ? 'fa-gamepad' : 'fa-music'}`} /><p>{x}</p></div></div>)}</div></div></div></div>
 }
 
@@ -965,7 +965,7 @@ function AdminPage({ me }) {
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState({})
-  useEffect(() => { document.title = '管理后台 - 易聊社区' }, [])
+  useEffect(() => { document.title = '管理后台 - 泓聊社区' }, [])
   useEffect(() => { if (me?.role === 'admin') load(tab) }, [tab, me])
   if (!me) return <div className="main-content"><div className="alert alert-info">请先 <a href="/login">登录</a> 后进入后台</div></div>
   if (me.role !== 'admin') return <div className="main-content"><div className="alert alert-error">当前账号不是管理员，无法访问后台</div></div>
@@ -1082,7 +1082,7 @@ function AdminSettings({ data, draft, setDraft, run }) {
   const save = () => run(() => api('/api/admin/settings', { method:'PUT', body: JSON.stringify(s) }).then(() => { chromeCache = null; chromePromise = null }))
   return <div className="admin-card"><h3><i className="fas fa-gear" /> 系统设置</h3>
     <div className="settings-grid">
-      <label><span>网站名字</span><input className="form-input" value={s.site_name || ''} placeholder="易聊社区" onChange={e => set('site_name', e.target.value)} /></label>
+      <label><span>网站名字</span><input className="form-input" value={s.site_name || ''} placeholder="泓聊社区" onChange={e => set('site_name', e.target.value)} /></label>
       <label><span>网站 Logo URL</span><input className="form-input" value={s.site_logo || ''} placeholder="/uploads/logo.png 或 https://..." onChange={e => set('site_logo', e.target.value)} /></label>
       <label><span>默认用户头像</span><input className="form-input" value={s.default_avatar || ''} placeholder="新用户默认头像 URL" onChange={e => set('default_avatar', e.target.value)} /></label>
       <label><span>邮件通知</span><select className="form-select" value={s.email_enabled ? '1' : '0'} onChange={e => set('email_enabled', e.target.value === '1')}><option value="0">关闭</option><option value="1">开启</option></select></label>
@@ -1092,7 +1092,7 @@ function AdminSettings({ data, draft, setDraft, run }) {
       <label><span>SMTP 密码</span><input className="form-input" type="password" value={s.smtp_password || ''} placeholder="留空或 *** 表示不修改" onChange={e => set('smtp_password', e.target.value)} /></label>
       <label><span>发件人</span><input className="form-input" value={s.smtp_from || ''} onChange={e => set('smtp_from', e.target.value)} /></label>
       <label><span>同一帖子24小时邮件上限</span><input className="form-input" type="number" min="0" max="100" value={s.comment_email_limit_24h ?? 8} onChange={e => set('comment_email_limit_24h', Number(e.target.value || 0))} /></label>
-      <label className="settings-wide"><span>首页跑马灯 JSON</span><textarea className="form-textarea" value={s.banners_json || ''} placeholder='[{"tag":"HOT","content":"欢迎加入易聊社区","color":"cyan"}]' onChange={e => set('banners_json', e.target.value)} /></label>
+      <label className="settings-wide"><span>首页跑马灯 JSON</span><textarea className="form-textarea" value={s.banners_json || ''} placeholder='[{"tag":"HOT","content":"欢迎加入泓聊社区","color":"cyan"}]' onChange={e => set('banners_json', e.target.value)} /></label>
     </div>
     <div className="alert alert-info">跑马灯支持 tag/content/color；被评论会生成红色站内气泡，点击单条后红点消失，也可全部已读。</div>
     <div className="admin-actions settings-actions"><button className="btn btn-primary" onClick={save}>保存系统设置</button></div>
@@ -1104,7 +1104,7 @@ function ChannelsPage() {
   const [data, setData] = useState(null)
   const [err, setErr] = useState('')
   useEffect(() => {
-    document.title = '频道 - 易聊社区'
+    document.title = '频道 - 泓聊社区'
     let alive = true
     const loadChannels = () => api('/api/channels').then(d => alive && setData(d)).catch(e => { if (alive) { setErr(e.message); if (e.message === '请先登录') clearInterval(timer) } })
     loadChannels()

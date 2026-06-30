@@ -35,7 +35,14 @@ def main():
 
     suffix = int(time.time() * 1000)
     username = f"质检用户{suffix}"
-    reg = client.post("/api/register", json={"username": username, "email": f"qa{suffix}@example.com", "password": "123456"})
+    email = f"qa{suffix}@example.com"
+    email_code = "123456"
+    with mod.db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO email_verification_codes(email,code_hash,expires_at,attempts,created_at) VALUES(?,?,?,?,?)",
+            (email, mod.code_digest(email, email_code), "2099-01-01 00:00:00", 0, mod.now()),
+        )
+    reg = client.post("/api/register", json={"username": username, "email": email, "email_code": email_code, "password": "123456"})
     assert_true(reg.status_code == 200, f"register failed: {reg.text}")
     token = reg.json()["token"]
     headers = {"Authorization": f"Bearer {token}"}
@@ -57,10 +64,10 @@ def main():
     detail2 = client.get(f"/api/posts/{post_id}")
     assert_true(any(c["content"] == "自动化质检评论" for c in detail2.json()["comments"]), "comment not persisted")
 
-    search_posts = client.get("/api/search", params={"q": title, "type": "posts"})
+    search_posts = client.get("/api/search", params={"q": title, "type": "posts"}, headers=headers)
     assert_true(any(p["id"] == post_id for p in search_posts.json()["items"]), "post search failed")
 
-    search_users = client.get("/api/search", params={"q": username, "type": "users"})
+    search_users = client.get("/api/search", params={"q": username, "type": "users"}, headers=headers)
     assert_true(any(u["username"] == username for u in search_users.json()["items"]), "user search failed")
 
     bad = client.post("/api/posts", json={"title": "未登录", "content": "应失败"})
@@ -71,7 +78,7 @@ def main():
 
     for path in ["/", "/login", "/register", "/new", f"/post/{post_id}", f"/user/{reg.json()['user']['id']}", "/games", "/music", "/admin"]:
         r = client.get(path)
-        assert_true(r.status_code == 200 and "易聊社区" in r.text, f"SPA route failed: {path}")
+        assert_true(r.status_code == 200 and "泓聊社区" in r.text, f"SPA route failed: {path}")
 
     # Admin API requires admin role and supports dashboard/content operations.
     forbidden = client.get("/api/admin/overview", headers=headers)

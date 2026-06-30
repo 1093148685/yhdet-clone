@@ -30,7 +30,7 @@ DB_PATH = Path(os.getenv("YHDET_DB_PATH", str(DATA_DIR / "community.db")))
 SEED_USER_PASSWORD = os.getenv("YHDET_SEED_USER_PASSWORD", "change-me")
 SITE_STARTED_AT = datetime.now()
 
-app = FastAPI(title="易聊社区", version="2.0.0")
+app = FastAPI(title="泓聊社区", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,7 +58,7 @@ async def block_banned_ip(request: Request, call_next):
 
 DEFAULT_AVATAR = "/static/avatar.svg"
 BANNERS = [
-    {"tag": "HOT", "content": "欢迎加入易聊社区，结识更多有趣的人！", "color": "cyan"},
+    {"tag": "HOT", "content": "欢迎加入泓聊社区，结识更多有趣的人！", "color": "cyan"},
     {"tag": "NEW", "content": "投递广告申请请发送邮件至 F17376088816@163.COM", "color": "cyan"},
     {"tag": "NEW", "content": "AI 智能助手现已上线，快来体验对话！", "color": "pink"},
     {"tag": "EVENT", "content": "周末辩论赛进行中，等你来挑战！", "color": "yellow"},
@@ -131,7 +131,7 @@ def days_between(start: str | None, end: datetime | None = None) -> int | None:
 
 def default_settings() -> dict[str, str]:
     return {
-        "site_name": "易聊社区",
+        "site_name": "泓聊社区",
         "site_logo": "",
         "default_avatar": DEFAULT_AVATAR,
         "email_enabled": "0",
@@ -816,7 +816,7 @@ def send_smtp_mail(settings: dict[str, Any], to_email: str, subject: str, body: 
     username = str(settings.get("smtp_user") or "").strip()
     password = str(settings.get("smtp_password") or "").strip()
     from_email = str(settings.get("smtp_from") or username).strip()
-    from_name = str(settings.get("smtp_from_name") or settings.get("site_name") or "易聊社区").strip()
+    from_name = str(settings.get("smtp_from_name") or settings.get("site_name") or "泓聊社区").strip()
     if not (host and port and username and password and from_email):
         raise HTTPException(status_code=400, detail="邮箱发送配置不完整")
     msg = EmailMessage()
@@ -854,8 +854,8 @@ def send_email_code(payload: EmailCodeIn):
         return {"success": False, "message": "邮箱格式不正确"}
     code = "".join(secrets.choice("0123456789") for _ in range(6))
     expires = datetime.now() + timedelta(minutes=10)
-    subject = "易聊社区注册验证码"
-    body = f"您的易聊社区注册验证码是：{code}\n\n验证码 10 分钟内有效。如非本人操作，请忽略本邮件。"
+    subject = "泓聊社区注册验证码"
+    body = f"您的泓聊社区注册验证码是：{code}\n\n验证码 10 分钟内有效。如非本人操作，请忽略本邮件。"
     with db() as conn:
         settings = get_settings(conn, include_secret=True)
         if not settings.get("email_enabled"):
