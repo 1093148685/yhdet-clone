@@ -1,11 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
-const fallbackAvatar = 'https://yhdet.top/static/avatars/avatar_1.png'
+const fallbackAvatar = '/static/avatar.svg'
 const tokenKey = 'yhdet_token'
-const avatarFallbacks = ['/static/avatar.svg', fallbackAvatar]
+const avatarFallbacks = ['/static/avatar.svg']
+const defaultSite = { site_name: '易聊社区', site_logo: '', default_avatar: fallbackAvatar }
 function safeAvatar(src) {
   if (!src || typeof src !== 'string') return avatarFallbacks[0]
   if (src.includes('robots.txt') || src.includes('t.alcy.cc')) return avatarFallbacks[0]
@@ -29,26 +30,32 @@ function currentRoute() {
 function navigate(to, { replace = false } = {}) {
   const url = new URL(to, location.origin)
   const next = url.pathname + url.search
+  const from = currentRoute()
   if (url.origin !== location.origin) {
     location.href = url.href
     return
   }
-  if (next === currentRoute()) return
+  if (next === from) return
   history[replace ? 'replaceState' : 'pushState'](null, '', next)
-  window.dispatchEvent(new CustomEvent('app:navigate', { detail: { path: next } }))
+  window.dispatchEvent(new CustomEvent('app:navigate', { detail: { path: next, from } }))
 }
 
 function useRoute() {
   const [path, setPath] = useState(currentRoute())
   useEffect(() => {
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
     let raf = 0
-    const sync = () => {
+    const sync = (event) => {
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const next = currentRoute()
+        const prev = event?.detail?.from || document.documentElement.dataset.route || ''
         setPath(next)
         document.documentElement.dataset.route = next
-        window.scrollTo({ top: 0, behavior: 'auto' })
+        const nextPath = new URL(next, location.origin).pathname
+        const prevPath = new URL(prev || '/', location.origin).pathname
+        const returningHomeFromPost = nextPath === '/' && prevPath.startsWith('/post/')
+        if (!returningHomeFromPost) window.scrollTo({ top: 0, behavior: 'auto' })
       })
     }
     const onClick = e => {
@@ -75,6 +82,7 @@ function useRoute() {
 
 let chromeCache = null
 let chromePromise = null
+let homeStateCache = null
 function getChrome() {
   if (chromeCache) return Promise.resolve(chromeCache)
   if (!chromePromise) chromePromise = api('/api/chrome').then(d => (chromeCache = d))
@@ -82,32 +90,55 @@ function getChrome() {
 }
 
 async function api(path, options = {}) {
-  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
+  const isForm = options.body instanceof FormData
+  const headers = { ...(isForm ? {} : { 'Content-Type': 'application/json' }), ...(options.headers || {}) }
   const token = localStorage.getItem(tokenKey)
   if (token) headers.Authorization = `Bearer ${token}`
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
   const json = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(json.detail || '请求失败')
+  if (!res.ok) {
+    if (res.status === 403 && /冻结|封禁|禁止访问/.test(json.detail || '')) {
+      localStorage.removeItem(tokenKey)
+      localStorage.removeItem('yhdet_user')
+      window.dispatchEvent(new CustomEvent('app:session-expired', { detail: json.detail || '账号不可用' }))
+    }
+    throw new Error(json.detail || '请求失败')
+  }
   return json
 }
 
-function Nav({ me, setMe, path }) {
+function Nav({ me, setMe, path, site = defaultSite }) {
   const current = new URL(path, location.origin).pathname
   const cls = (path) => `nav-link ${current === path ? 'active' : ''}`
-  const logout = () => { localStorage.removeItem(tokenKey); setMe(null); navigate('/') }
+  const logout = () => { localStorage.removeItem(tokenKey); localStorage.removeItem('yhdet_user'); setMe(null); navigate('/') }
   return <nav className="navbar">
     <div className="navbar-inner">
-      <a href="/" className="navbar-brand"><span className="logo-icon"><i className="fas fa-comments" /></span>易聊社区</a>
+      <a href="/" className="navbar-brand"><span className="logo-icon">{site.site_logo ? <img src={safeAvatar(site.site_logo)} alt="" /> : <i className="fas fa-comments" />}</span>{site.site_name || '易聊社区'}</a>
       <div className="navbar-menu">
         <a href="/" className={cls('/')}><i className="fas fa-home" /> 首页</a>
         <a href="/channels" className={cls('/channels')}><i className="fas fa-broadcast-tower" /> 频道</a>
         <a href="/games" className={cls('/games')}><i className="fas fa-gamepad" /> 小游戏</a>
         <a href="/music" className={cls('/music')}><i className="fas fa-music" /> 音乐</a>
         {me?.role === 'admin' && <a href="/admin" className={cls('/admin')}><i className="fas fa-shield-halved" /> 后台</a>}
-        {me ? <><a href="/new" className="nav-btn"><i className="fas fa-pen" /> 发帖</a><a href={`/user/${me.id}`} className="nav-link">{me.username}</a><button className="nav-btn nav-btn-outline" onClick={logout}>退出</button></> : <><a href="/login" className="nav-btn nav-btn-outline">登录</a><a href="/register" className="nav-btn">注册</a></>}
+        {me ? <><a href="/new" className="nav-btn"><i className="fas fa-pen" /> 发帖</a><NotificationBell /><button className="nav-btn nav-btn-outline" onClick={logout}>退出</button></> : <><a href="/login" className="nav-btn nav-btn-outline">登录</a><a href="/register" className="nav-btn">注册</a></>}
       </div>
     </div>
   </nav>
+}
+
+function NotificationBell() {
+  const [n, setN] = useState(0)
+  useEffect(() => {
+    let alive = true
+    const load = () => api('/api/me/notifications?page_size=1').then(d => alive && setN(d.unread || 0)).catch(() => {})
+    load()
+    const onRefresh = () => load()
+    window.addEventListener('notifications:refresh', onRefresh)
+    const t = setInterval(load, 5000)
+    return () => { alive = false; clearInterval(t); window.removeEventListener('notifications:refresh', onRefresh) }
+  }, [])
+  const me = JSON.parse(localStorage.getItem('yhdet_user') || '{}')
+  return <a className="nav-link nav-user-with-badge" href={`/user/${me.id || ''}#comments`} title="个人主页">{me.username || '我的主页'}{n > 0 && <span className="bubble-badge red-badge">{n > 99 ? '99+' : n}</span>}</a>
 }
 
 function SiteStats({ stats }) {
@@ -134,9 +165,9 @@ function PageChrome() {
   return <><SiteStats stats={data.stats} /><LedBanner banners={data.banners} /></>
 }
 
-function SearchBox({ onSearch, searching = false }) {
-  const [q, setQ] = useState('')
-  const [type, setType] = useState('posts')
+function SearchBox({ onSearch, searching = false, initialQuery = '', initialType = 'posts' }) {
+  const [q, setQ] = useState(initialQuery)
+  const [type, setType] = useState(initialType)
   return <div className="search-container animate-fadeInUp"><form action="/" method="get" style={{ display: 'flex', gap: 12, width: '100%', flexWrap: 'wrap' }} onSubmit={(e) => { e.preventDefault(); onSearch(q, type) }}>
     <div className="search-input-wrap"><i className="fas fa-search" /><input type="text" name="q" className="search-input" placeholder="搜索帖子或用户..." value={q} onChange={e => setQ(e.target.value)} /></div>
     <select name="type" className="search-select" value={type} onChange={e => setType(e.target.value)}><option value="posts">搜索帖子</option><option value="users">搜索用户</option></select>
@@ -145,15 +176,90 @@ function SearchBox({ onSearch, searching = false }) {
 }
 
 function htmlText(s = '') { return s.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '') }
+function parseTimeValue(s = '') {
+  if (!s) return null
+  let normalized = String(s).trim().replace(' ', 'T')
+  // Backend stores channel feed times in UTC but often without a timezone suffix.
+  // Treat timezone-less timestamps as UTC to avoid showing "8小时前" on CN browsers.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(normalized)) normalized += 'Z'
+  const d = new Date(normalized)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+function formatAbsoluteTime(d) {
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+function displayTime(s = '') { return s ? String(s).replace('T', ' ').slice(0, 19) : '' }
+function communityAge(days) {
+  if (days === null || days === undefined || days === '') return ''
+  const n = Number(days)
+  if (!Number.isFinite(n)) return ''
+  if (n >= 365) return `${Math.floor(n / 365)}年${n % 365 ? `${n % 365}天` : ''}`
+  return `${n}天`
+}
+function formatCount(v, suffix = '') {
+  if (v === null || v === undefined || v === '') return ''
+  const n = Number(v)
+  if (!Number.isFinite(n)) return ''
+  return `${n.toLocaleString()}${suffix}`
+}
+function relativeTime(s = '') {
+  const d = parseTimeValue(s)
+  if (!d) return s
+  const diff = Math.max(0, Date.now() - d.getTime())
+  const min = Math.floor(diff / 60000)
+  if (min < 2) return '1分钟前'
+  if (min < 60) return `${min}分钟前`
+  const hours = Math.floor(min / 60)
+  if (hours < 24) return `${hours}小时前`
+  if (hours < 48) return '一天前'
+  return formatAbsoluteTime(d)
+}
+function sourceLinkLabel(url = '') {
+  const u = String(url).toLowerCase()
+  if (u.includes('linux.do')) return '查看 Linux.do 原帖'
+  if (u.includes('forum.naixi.net')) return '查看奶昔论坛原帖'
+  return '查看来源原帖'
+}
+
+function ProfileStats({ stats = {} }) {
+  const items = [
+    ['加入社区', displayTime(stats.joined_at), 'fa-calendar-plus'],
+    ['社区年龄', communityAge(stats.community_age_days), 'fa-seedling'],
+    ['发布帖子', formatCount(stats.posts_count, ' 篇'), 'fa-pen-nib'],
+    ['发出评论', formatCount(stats.comments_count, ' 条'), 'fa-comment-dots'],
+    ['浏览帖子', formatCount(stats.views_count, ' 次'), 'fa-eye'],
+    ['单帖最高评论', formatCount(stats.max_post_comments, ' 条'), 'fa-fire'],
+    ['最后活跃', displayTime(stats.last_active_at), 'fa-clock'],
+  ].filter(x => x[1] !== '' && x[1] !== null && x[1] !== undefined)
+  if (!items.length) return null
+  return <div className="profile-stats-grid">{items.map(([label, value, icon]) => <div className="profile-stat" key={label}><span><i className={`fas ${icon}`} /> {label}</span><b>{value}</b></div>)}</div>
+}
+
+function SiteFooter({ site = defaultSite }) {
+  const stats = site.stats || {}
+  const runtime = site.runtime || {}
+  return <footer className="footer site-footer">
+    <div className="footer-brand">{site.site_name || '易聊社区'}</div>
+    <div className="footer-meta">
+      {runtime.uptime_text && <span><i className="fas fa-signal" /> 已运行 {runtime.uptime_text}</span>}
+      {runtime.started_at && <span><i className="far fa-clock" /> 启动 {displayTime(runtime.started_at)}</span>}
+      {stats.users !== undefined && <span><i className="fas fa-users" /> 用户 {stats.users}</span>}
+      {stats.posts !== undefined && <span><i className="fas fa-file-lines" /> 帖子 {stats.posts}</span>}
+      {stats.comments !== undefined && <span><i className="fas fa-comments" /> 评论 {stats.comments}</span>}
+      {runtime.version && <span>v{runtime.version}</span>}
+    </div>
+  </footer>
+}
 
 function PostItem({ post }) {
   return <a href={`/post/${post.id}`} className="post-item" style={{ textDecoration: 'none', display: 'block' }} onMouseDown={e => e.currentTarget.classList.add('is-active')} onBlur={e => e.currentTarget.classList.remove('is-active')}>
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
       <img src={safeAvatar(post.avatar)} alt="" className="post-avatar" loading="lazy" decoding="async" onError={onAvatarError} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="post-title">{post.title}</div>
+        <div className="post-title">{post.pinned && <span className="pin-badge"><i className="fas fa-thumbtack" /> 置顶</span>}{post.title}</div>
         <div className="post-preview">{htmlText(post.preview || post.content)}</div>
-        <div className="post-meta"><div className="post-meta-item"><a href={`/user/${post.user_id}`} className="post-author-name" onClick={e => e.stopPropagation()}>{post.author}</a>{post.role && <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {post.role}</span>}</div><div className="post-meta-item"><i className="far fa-clock" /> {post.time}</div><div className="post-stats"><span className="post-stat"><i className="far fa-comment" /> {post.comments || ''}</span><span className="post-stat"><i className="far fa-eye" /> {post.views || ''}</span></div></div>
+        <div className="post-meta"><div className="post-meta-item"><a href={`/user/${post.user_id}`} className="post-author-name" onClick={e => e.stopPropagation()}>{post.author}</a>{post.role && <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {post.role}</span>}</div><div className="post-meta-item"><i className="far fa-clock" /> {relativeTime(post.time)}</div><div className="post-stats"><span className="post-stat"><i className="far fa-comment" /> {post.comments || ''}</span><span className="post-stat"><i className="far fa-eye" /> {post.views || ''}</span></div></div>
         {post.custom_title && <span className="custom-title" style={{ marginTop: 6 }}>{post.custom_title}</span>}
       </div>
     </div>
@@ -170,15 +276,121 @@ function UserResults({ users }) {
 }
 
 function Home() {
-  const [data, setData] = useState(null)
-  const [posts, setPosts] = useState([])
-  const [users, setUsers] = useState(null)
+  const PAGE_SIZE = 30
+  const LOAD_COOLDOWN_MS = 1100
+  const [data, setData] = useState(() => homeStateCache?.data || null)
+  const [posts, setPosts] = useState(() => homeStateCache?.posts || [])
+  const [users, setUsers] = useState(() => homeStateCache?.users || null)
+  const [usersPage, setUsersPage] = useState(() => homeStateCache?.usersPage || 1)
+  const [usersHasMore, setUsersHasMore] = useState(() => homeStateCache?.usersHasMore || false)
+  const [usersLoadingMore, setUsersLoadingMore] = useState(false)
   const [searching, setSearching] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(() => homeStateCache?.hasMore ?? true)
+  const [totalPosts, setTotalPosts] = useState(() => homeStateCache?.totalPosts || 0)
+  const [query, setQuery] = useState(() => homeStateCache?.query || '')
   const [err, setErr] = useState('')
-  useEffect(() => { let alive = true; api('/api/home').then(d => { if (alive) { setData(d); setPosts(d.posts) } }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [])
-  async function onSearch(q, type) { setSearching(true); setErr(''); try { const res = await api(`/api/search?q=${encodeURIComponent(q)}&type=${type}`); if (type === 'users') setUsers(res.items); else { setUsers(null); setPosts(res.items) } } catch(e) { setErr(e.message) } finally { setSearching(false) } }
+  const loadingRef = useRef(false)
+  const lastLoadAtRef = useRef(0)
+  const searchTypeRef = useRef(homeStateCache?.searchType || 'posts')
+  const restoreScrollRef = useRef(homeStateCache?.scrollY || 0)
+  const restoredScrollRef = useRef(false)
+
+  async function loadPostsPage({ reset = false, q = query, silent = false } = {}) {
+    if (loadingRef.current) return
+    const elapsed = Date.now() - lastLoadAtRef.current
+    if (!reset && elapsed < LOAD_COOLDOWN_MS) return
+    loadingRef.current = true
+    lastLoadAtRef.current = Date.now()
+    if (reset) setSearching(true)
+    else setLoadingMore(true)
+    try {
+      const nextPage = reset ? 1 : Math.floor(posts.length / PAGE_SIZE) + 1
+      const res = await api(`/api/posts?page=${nextPage}&page_size=${PAGE_SIZE}&q=${encodeURIComponent(q || '')}`)
+      setUsers(null)
+      setPosts(prev => reset ? (res.items || []) : [...prev, ...(res.items || [])])
+      setHasMore(Boolean(res.has_more))
+      setTotalPosts(res.total || 0)
+      setErr('')
+    } catch (e) {
+      if (!silent) setErr(e.message)
+    } finally {
+      loadingRef.current = false
+      setSearching(false)
+      setLoadingMore(false)
+    }
+  }
+
+  useEffect(() => {
+    let alive = true
+    let timer = 0
+    const loadHome = (silent = false) => api('/api/home').then(d => {
+      if (!alive) return
+      setData(d); if (d.settings) chromeCache = d
+    }).catch(e => { if (alive && !silent) setErr(e.message) })
+    loadHome(false).then(() => { if (alive && !homeStateCache?.posts?.length) loadPostsPage({ reset: true, q: '', silent: true }) })
+    timer = setInterval(() => { if (!document.hidden) loadHome(true) }, 15000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [])
+
+  useEffect(() => {
+    const preservedScroll = restoredScrollRef.current ? window.scrollY : restoreScrollRef.current
+    homeStateCache = { data, posts, users, usersPage, usersHasMore, hasMore, totalPosts, query, searchType: searchTypeRef.current, scrollY: preservedScroll }
+  }, [data, posts, users, usersPage, usersHasMore, hasMore, totalPosts, query])
+  useEffect(() => {
+    if (restoreScrollRef.current) requestAnimationFrame(() => { window.scrollTo({ top: restoreScrollRef.current, behavior: 'auto' }); restoredScrollRef.current = true })
+    else restoredScrollRef.current = true
+    const saveScroll = () => {
+      if (new URL(currentRoute(), location.origin).pathname === '/' && homeStateCache) homeStateCache.scrollY = window.scrollY
+    }
+    window.addEventListener('scroll', saveScroll, { passive: true })
+    return () => { saveScroll(); window.removeEventListener('scroll', saveScroll) }
+  }, [])
+
+  useEffect(() => {
+    if (users) return
+    const onScroll = () => {
+      if (!hasMore || loadingRef.current || searching || loadingMore) return
+      const remain = document.documentElement.scrollHeight - window.scrollY - window.innerHeight
+      if (remain < 480) loadPostsPage({ reset: false })
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [hasMore, searching, loadingMore, users, posts.length, query])
+
+  async function onSearch(q, type) {
+    setErr('')
+    searchTypeRef.current = type
+    setQuery(q || '')
+    if (type === 'users') {
+      setSearching(true)
+      try {
+        const res = await api(`/api/search?q=${encodeURIComponent(q)}&type=users&page=1&page_size=30`)
+        setUsers(res.items || [])
+        setUsersPage(1)
+        setUsersHasMore(Boolean(res.has_more))
+        setHasMore(false)
+      } catch(e) { setErr(e.message) }
+      finally { setSearching(false) }
+      return
+    }
+    await loadPostsPage({ reset: true, q: q || '' })
+  }
+  async function loadMoreUsers() {
+    if (!usersHasMore || usersLoadingMore) return
+    setUsersLoadingMore(true)
+    try {
+      const np = usersPage + 1
+      const res = await api(`/api/search?q=${encodeURIComponent(query)}&type=users&page=${np}&page_size=30`)
+      setUsers(v => [...(v || []), ...(res.items || [])])
+      setUsersPage(np)
+      setUsersHasMore(Boolean(res.has_more))
+    } catch(e) { setErr(e.message) }
+    finally { setUsersLoadingMore(false) }
+  }
   if (!data) return <HomeSkeleton />
-  return <><SiteStats stats={data.stats} /><LedBanner banners={data.banners} /><div className="main-content"><SearchBox onSearch={onSearch} searching={searching} />{err && <div className="alert alert-error">{err}</div>}<div className="home-layout"><div>{users ? <UserResults users={users} /> : <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-fire" style={{ color: 'var(--secondary)' }} /> 最新帖子</h3>{searching && <span className="mini-busy">刷新中</span>}</div><div>{searching ? <PostListSkeleton count={5} /> : posts.length ? posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到帖子</p></div>}</div></div>}</div><Sidebar donors={data.donors} notice={data.notice} /></div></div></>
+  return <><SiteStats stats={data.stats} /><LedBanner banners={data.banners} /><div className="main-content"><SearchBox onSearch={onSearch} searching={searching} initialQuery={query} initialType={searchTypeRef.current} />{err && <div className="alert alert-error">{err}</div>}<div className="home-layout"><div>{users ? <UserResults users={users} hasMore={usersHasMore} loadingMore={usersLoadingMore} onMore={loadMoreUsers} /> : <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-fire" style={{ color: 'var(--secondary)' }} /> 最新帖子</h3>{searching && <span className="mini-busy">刷新中</span>}</div><div>{searching && posts.length === 0 ? <PostListSkeleton count={5} /> : posts.length ? posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到帖子</p></div>}{posts.length > 0 && <div className="infinite-loader">{loadingMore ? <><i className="fas fa-spinner fa-spin" /> 正在加载下一页...</> : hasMore ? '滑到底部自动加载更多' : '已经到底了'}</div>}</div></div>}</div><Sidebar donors={data.donors} notice={data.notice} /></div></div></>
 }
 
 function CaptchaBox({ value, onChange }) {
@@ -211,9 +423,9 @@ function CaptchaBox({ value, onChange }) {
   </div>
 }
 
-function AuthPage({ mode, setMe }) {
+function AuthPage({ mode, setMe, site = defaultSite }) {
   const isLogin = mode === 'login'
-  useEffect(() => { document.title = `${isLogin ? '登录' : '注册'} - 易聊社区` }, [isLogin])
+  useEffect(() => { document.title = `${isLogin ? '登录' : '注册'} - ${(site.site_name || '易聊社区')}` }, [isLogin, site.site_name])
   const [form, setForm] = useState({ username: '', email: '', email_code: '', password: '', captcha: '' })
   const [err, setErr] = useState('')
   const [hint, setHint] = useState('')
@@ -245,12 +457,12 @@ function AuthPage({ mode, setMe }) {
     try {
       const payload = { ...form, username: form.username.trim(), email: form.email.trim() || null }
       const res = await api(isLogin ? '/api/login' : '/api/register', { method: 'POST', body: JSON.stringify(payload) })
-      localStorage.setItem(tokenKey, res.token); setMe(res.user); notify(isLogin ? '登录成功' : '注册成功', 'success'); navigate('/')
+      localStorage.setItem(tokenKey, res.token); localStorage.setItem('yhdet_user', JSON.stringify(res.user)); setMe(res.user); notify(isLogin ? '登录成功' : '注册成功', 'success'); navigate('/')
     } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setLoading(false) }
   }
   return <div className="auth-page">
     <div className={isLogin ? 'login-card' : 'register-card'}>
-      <div className={isLogin ? 'login-header' : 'register-header'}><h1>{isLogin ? '登录' : '注册'}</h1><p>易聊社区</p></div>
+      <div className={isLogin ? 'login-header' : 'register-header'}><h1>{isLogin ? '登录' : '注册'}</h1><p>{site.site_name || '易聊社区'}</p></div>
       {err && <div className="alert alert-error">{err}</div>}
       <form onSubmit={submit}>
         <div className="form-group"><label className="form-label" htmlFor="username">用户名</label><input id="username" type="text" className="form-input" placeholder="请输入用户名" required value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} /></div>
@@ -280,16 +492,320 @@ function renderContent(content = '') {
   return htmlText(content).split(/\n{2,}/).map((para, idx) => <p key={idx}>{para}</p>)
 }
 
+function inlineMarkdown(text = '') {
+  const parts = String(text).split(/(`[^`]+`|~~[^~]+~~|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^\s)]+\))/g).filter(Boolean)
+  return parts.map((part, idx) => {
+    if (/^`[^`]+`$/.test(part)) return <code key={idx}>{part.slice(1, -1)}</code>
+    if (/^~~[^~]+~~$/.test(part)) return <del key={idx}>{part.slice(2, -2)}</del>
+    if (/^\*\*[^*]+\*\*$/.test(part)) return <strong key={idx}>{part.slice(2, -2)}</strong>
+    if (/^\*[^*]+\*$/.test(part)) return <em key={idx}>{part.slice(1, -1)}</em>
+    const m = part.match(/^\[([^\]]+)\]\(([^\s)]+)\)$/)
+    if (m) return <a key={idx} href={m[2]} target="_blank" rel="noreferrer">{m[1]}</a>
+    return <React.Fragment key={idx}>{part}</React.Fragment>
+  })
+}
+
+function MarkdownRenderer({ content = '', compact = false }) {
+  const src = String(content || '').trim()
+  if (!src) return null
+  const blocks = src.split(/\n{2,}/).filter(Boolean)
+  let inCode = false
+  const rendered = []
+  let codeLines = []
+  let codeLang = ''
+  const flushCode = key => { rendered.push(<pre key={`code-${key}`} className="code-block"><code>{codeLines.join('\n')}</code></pre>); codeLines = []; codeLang = '' }
+  blocks.forEach((block, idx) => {
+    if (block.startsWith('```')) {
+      const lines = block.split('\n')
+      codeLang = lines[0].replace('```', '').trim()
+      const end = lines.lastIndexOf('```')
+      codeLines = end > 0 ? lines.slice(1, end) : lines.slice(1)
+      rendered.push(<pre key={idx} className="code-block" data-lang={codeLang}><code>{codeLines.join('\n')}</code></pre>)
+      return
+    }
+    const lines = block.split('\n')
+    if (/^#{1,3}\s+/.test(lines[0].trim())) { const level = lines[0].trim().match(/^#+/)[0].length; const text = lines[0].replace(/^#{1,3}\s+/, ''); const Tag = `h${Math.min(3, level)}`; rendered.push(<Tag key={idx}>{inlineMarkdown(text)}</Tag>); return }
+    if (lines.every(line => line.trim().startsWith('>'))) { rendered.push(<blockquote key={idx}>{lines.map(line => line.replace(/^>\s?/, '')).join('\n')}</blockquote>); return }
+    if (lines.every(line => /^[-*]\s+\[[ x]\]\s+/i.test(line.trim()))) { rendered.push(<ul key={idx} className="task-list">{lines.map((line, i) => { const checked = /^[-*]\s+\[x\]/i.test(line.trim()); return <li key={i}><input type="checkbox" checked={checked} readOnly />{inlineMarkdown(line.trim().replace(/^[-*]\s+\[[ x]\]\s+/i, ''))}</li> })}</ul>); return }
+    if (lines.every(line => /^[-*]\s+/.test(line.trim()))) { rendered.push(<ul key={idx}>{lines.map((line, i) => <li key={i}>{inlineMarkdown(line.trim().replace(/^[-*]\s+/, ''))}</li>)}</ul>); return }
+    if (lines.every(line => /^\d+\.\s+/.test(line.trim()))) { rendered.push(<ol key={idx}>{lines.map((line, i) => <li key={i}>{inlineMarkdown(line.trim().replace(/^\d+\.\s+/, ''))}</li>)}</ol>); return }
+    if (lines.length >= 2 && lines[0].includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[1])) { const headers = lines[0].split('|').map(x=>x.trim()).filter(Boolean); const rows = lines.slice(2).map(r=>r.split('|').map(x=>x.trim()).filter(Boolean)); rendered.push(<div className="md-table-wrap" key={idx}><table><thead><tr>{headers.map(h=><th key={h}>{inlineMarkdown(h)}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{r.map((cell,j)=><td key={j}>{inlineMarkdown(cell)}</td>)}</tr>)}</tbody></table></div>); return }
+    rendered.push(<p key={idx}>{lines.map((line, i) => <React.Fragment key={i}>{inlineMarkdown(line)}{i < lines.length - 1 && <br />}</React.Fragment>)}</p>)
+  })
+  return <div className={`markdown-body ${compact ? 'comment-markdown compact' : 'comment-markdown'}`}>{rendered}</div>
+}
+
+function websocketUrl(path) {
+  const base = API_BASE || ''
+  const origin = base ? new URL(base, location.origin) : location
+  const proto = origin.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${origin.host}${path}`
+}
+
+function useTopicPresence(topicId, me, onTopicEvent) {
+  const [presence, setPresence] = useState({ online_count: 0, viewers: [], overflow: 0, typing: [], editing: [] })
+  const wsRef = useRef(null)
+  const typingTimerRef = useRef(null)
+  const connectedRef = useRef(false)
+  const eventRef = useRef(onTopicEvent)
+  useEffect(() => { eventRef.current = onTopicEvent }, [onTopicEvent])
+  useEffect(() => {
+    if (!topicId) return
+    let closed = false
+    let reconnectTimer = null
+    let heartbeat = null
+    const connect = () => {
+      const token = localStorage.getItem(tokenKey) || ''
+      const qs = token ? `?token=${encodeURIComponent(token)}` : ''
+      const ws = new WebSocket(websocketUrl(`/ws/topics/${topicId}/presence${qs}`))
+      wsRef.current = ws
+      ws.onopen = () => { connectedRef.current = true; ws.send(JSON.stringify({ type: 'heartbeat' })) }
+      ws.onmessage = e => {
+        try {
+          const msg = JSON.parse(e.data)
+          if (msg.type === 'presence_snapshot') setPresence(msg)
+          if (msg.type && msg.type.startsWith('comment_')) eventRef.current?.(msg)
+        } catch {}
+      }
+      ws.onclose = () => {
+        connectedRef.current = false
+        if (!closed) reconnectTimer = setTimeout(connect, 1200)
+      }
+      heartbeat = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'heartbeat' })) }, 12000)
+    }
+    connect()
+    return () => { closed = true; clearTimeout(reconnectTimer); clearInterval(heartbeat); connectedRef.current = false; try { wsRef.current?.close() } catch {}; wsRef.current = null; clearTimeout(typingTimerRef.current) }
+  }, [topicId, me?.id])
+  const send = payload => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload))
+  }
+  const sendTyping = () => {
+    if (!me) return
+    send({ type: 'typing' })
+    clearTimeout(typingTimerRef.current)
+    typingTimerRef.current = setTimeout(() => send({ type: 'typing_end' }), 2500)
+  }
+  const sendTypingEnd = () => send({ type: 'typing_end' })
+  const sendEditing = commentId => { if (me && commentId) send({ type: 'editing', comment_id: commentId }) }
+  const sendEditingEnd = commentId => { if (commentId) send({ type: 'editing_end', comment_id: commentId }) }
+  return { presence, sendTyping, sendTypingEnd, sendEditing, sendEditingEnd }
+}
+
+function PresenceBar({ presence }) {
+  const viewers = presence.viewers || []
+  return <div className="presence-bar">
+    <div className="presence-avatars" title={`${presence.online_count || 0} 人正在浏览`}>
+      {viewers.map(u => <img key={u.id} src={safeAvatar(u.avatar)} alt={u.username} onError={onAvatarError} />)}
+      {presence.overflow > 0 && <span className="presence-more">+{presence.overflow}</span>}
+    </div>
+    <span className="presence-count"><i className="fas fa-circle" /> {presence.online_count || 0} 人正在浏览这个帖子</span>
+  </div>
+}
+
+function PresenceActivity({ presence }) {
+  const typing = (presence.typing || []).filter(u => !u.anonymous)
+  const editing = (presence.editing || []).map(x => x.user).filter(Boolean)
+  const unique = []
+  const seen = new Set()
+  ;[...typing, ...editing].forEach(u => { const key = String(u.id); if (!seen.has(key)) { seen.add(key); unique.push(u) } })
+  if (!unique.length) return null
+  const names = unique.slice(0, 2).map(u => u.username).join('、')
+  const action = typing.length && editing.length ? '正在协作' : typing.length ? '正在输入' : '正在编辑'
+  return <div className="presence-activity">
+    <div className="presence-avatars compact" title={unique.map(u => u.username).join('、')}>
+      {unique.slice(0, 5).map(u => <img key={u.id} src={safeAvatar(u.avatar)} alt={u.username} onError={onAvatarError} />)}
+      {unique.length > 5 && <span className="presence-more">+{unique.length - 5}</span>}
+    </div>
+    <span><span className="typing-dot" /> {names}{unique.length > 2 ? ` 等 ${unique.length} 人` : ''} {action}...</span>
+  </div>
+}
+
+function ReplyIndicator({ comment, onCancel, onJump }) {
+  if (!comment) return null
+  return <div className="reply-indicator"><button type="button" onClick={() => onJump?.(comment.id)}><i className="fas fa-reply" /> 回复 @{comment.author}</button>{onCancel && <button type="button" className="reply-cancel" onClick={onCancel}>取消回复</button>}</div>
+}
+
+function OutgoingReplyLink({ comment, onJump }) {
+  if (!comment.reply_to_comment_id) return null
+  const title = comment.reply_to_deleted ? '回复一条已删除的评论' : `回复 @${comment.reply_to_author || '用户'}`
+  return <button type="button" className={`outgoing-reply-link ${comment.reply_to_deleted ? 'deleted-ref' : ''}`} title={title} onClick={() => onJump(comment.reply_to_comment_id)}>
+    <svg className="reply-arrow" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <path d="M11.6 5.2 16.2 9.8l-4.6 4.6" />
+      <path d="M15.8 9.8H8.7c-3.1 0-5 1.8-5 4.8v.7" />
+    </svg>
+    <img src={safeAvatar(comment.reply_to_avatar)} alt={title} onError={onAvatarError} />
+  </button>
+}
+
+function RepliesBar({ replies = [], expanded, setExpanded, onJump }) {
+  if (!replies.length) return null
+  const latest = replies[replies.length - 1]
+  return <div className="replies-block">
+    <div className="replies-bar">
+      <button type="button" className="replies-toggle" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
+        <i className={`fas ${expanded ? 'fa-chevron-down' : 'fa-chevron-right'}`} />
+        <span>{replies.length} 条回复</span>
+      </button>
+      <button type="button" className="jump-reply" onClick={() => onJump(latest.id)}>跳到最新回复</button>
+    </div>
+    {expanded && <div className="replies-expanded">
+      {replies.map(r => <CommentCard key={`preview-${r.id}`} comment={r} onReply={() => {}} onEdit={() => {}} onDelete={() => {}} directReplies={[]} onJump={onJump} embedded />)}
+    </div>}
+  </div>
+}
+
+function CommentCard({ comment, onReply, onEdit, onDelete, directReplies = [], onJump, embedded = false }) {
+  const [busy, setBusy] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const jump = onJump || ((id) => onReply({ ...comment, jump_to_id: id, quote_only: true }))
+  async function remove() {
+    if (!confirm('确定删除这条评论吗？如果没有人回复过，它会直接从评论区消失。')) return
+    setBusy(true)
+    try { await onDelete(comment); notify('评论已删除', 'success') } finally { setBusy(false) }
+  }
+  return <article id={embedded ? undefined : `comment-${comment.id}`} className={`comment-card topic-post regular ${comment.deleted ? 'is-deleted' : ''} ${embedded ? 'reply-preview-card' : ''}`}>
+    <div className="topic-avatar"><a href={`/user/${comment.user_id || ''}`}><img className="avatar" src={safeAvatar(comment.avatar)} alt="头像" loading="lazy" decoding="async" onError={onAvatarError} /></a></div>
+    <div className="comment-main topic-body">
+      <div className="comment-head topic-meta-data"><div className="names"><span className="first"><a className="comment-author" href={`/user/${comment.user_id || ''}`}>{comment.author}</a></span>{comment.role && <span className="user-title">{comment.role}</span>}</div><div className="post-infos"><OutgoingReplyLink comment={comment} onJump={jump} /><time className="post-info">{relativeTime(comment.time)}</time>{comment.edited && <span className="edited-mark">已编辑 · {relativeTime(comment.updated_at)}</span>}</div></div>
+      <div className="regular-contents">
+        {comment.deleted ? <div className="deleted-comment-box"><i className="fas fa-ban" /><div><strong>{comment.deleted_by_admin ? '此评论因违反社区规范已被管理员删除。' : '此评论已删除'}</strong>{comment.deleted_at && <span>删除于 {relativeTime(comment.deleted_at)}</span>}</div></div> : <MarkdownRenderer content={comment.content} compact />}
+      </div>
+      {!embedded && !comment.deleted && <nav className="comment-actions post-controls"><div className="actions"><button type="button" className="reply create" title="回复" aria-label="回复" onClick={() => onReply(comment)}><i className="fas fa-reply" /></button>{(comment.can_edit || comment.can_delete) && <div className="comment-more"><button type="button" className="more-toggle" title="更多" aria-label="更多" onClick={() => setMenuOpen(v => !v)}><i className="fas fa-ellipsis" /></button>{menuOpen && <div className="comment-menu"><button type="button" disabled={!comment.can_edit} onClick={() => { setMenuOpen(false); onEdit(comment) }}><i className="fas fa-pen" /> 编辑</button><button type="button" disabled={!comment.can_delete || busy} className="danger-link" onClick={() => { setMenuOpen(false); remove() }}><i className="fas fa-trash" /> 删除</button></div>}</div>}</div></nav>}
+      {!embedded && <RepliesBar replies={directReplies} expanded={expanded} setExpanded={setExpanded} onJump={jump} />}
+    </div>
+  </article>
+}
+
+function CommentList({ comments = [], onReply, onEdit, onDelete, onJump }) {
+  const [visible, setVisible] = useState(20)
+  const sentinelRef = useRef(null)
+  const repliesByParent = useMemo(() => {
+    const map = new Map()
+    for (const c of comments) {
+      if (!c.reply_to_comment_id) continue
+      const key = Number(c.reply_to_comment_id)
+      if (!map.has(key)) map.set(key, [])
+      map.get(key).push(c)
+    }
+    return map
+  }, [comments])
+  useEffect(() => { setVisible(20) }, [comments.length])
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    const io = new IntersectionObserver(entries => { if (entries[0]?.isIntersecting) setVisible(v => Math.min(comments.length, v + 20)) }, { rootMargin: '240px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [comments.length])
+  if (!comments.length) return <div className="empty-state"><i className="fas fa-comment-dots" /><p>暂无回复，来说点什么吧</p></div>
+  return <div className="comment-list">{comments.slice(0, visible).map(c => <CommentCard key={c.id} comment={c} onReply={onReply} onEdit={onEdit} onDelete={onDelete} directReplies={repliesByParent.get(Number(c.id)) || []} onJump={onJump} />)}{visible < comments.length && <div ref={sentinelRef} className="infinite-loader">正在加载更多回复...</div>}</div>
+}
+
+function CommentEditor({ me, mode = 'reply', editingComment, content, setContent, replyingTo, onCancelReply, onCancelEdit, onJump, onSubmit, sending, err, onTyping, onTypingEnd }) {
+  const [preview, setPreview] = useState(false)
+  if (!me) return <div className="comment-login"><p>登录后即可发表回复</p><a className="btn btn-primary" href="/login"><i className="fas fa-right-to-bracket" /> 去登录</a></div>
+  return <form className="comment-editor" onSubmit={onSubmit}>
+    {err && <div className="alert alert-error">{err}</div>}
+    {mode === 'reply' && <ReplyIndicator comment={replyingTo} onCancel={onCancelReply} onJump={onJump} />}
+    {mode === 'edit' && <div className="reply-indicator edit-mode-indicator"><span><i className="fas fa-pen" /> 正在编辑评论 #{editingComment?.id}</span>{onCancelEdit && <button type="button" className="reply-cancel" onClick={onCancelEdit}>取消编辑</button>}</div>}
+    <div className="editor-toolbar"><span><i className="fab fa-markdown" /> 支持 Markdown</span><button type="button" onClick={() => setPreview(!preview)}>{preview ? '继续编辑' : '实时预览'}</button></div>
+    {preview ? <div className="editor-preview"><MarkdownRenderer content={content || '预览会显示在这里'} compact /></div> : <textarea className="form-textarea comment-textarea" required maxLength={2000} value={content} onChange={e => { setContent(e.target.value); onTyping?.() }} onBlur={() => onTypingEnd?.()} onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') onSubmit(e) }} placeholder={mode === 'edit' ? '编辑评论，Ctrl + Enter 保存' : replyingTo ? `回复 @${replyingTo.author}，Ctrl + Enter 发送` : '写下你的回复，Ctrl + Enter 发送'} />}
+    <div className="editor-actions"><span>{content.length}/2000</span><button className="btn btn-primary" disabled={sending || !content.trim()}><i className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} /> {sending ? '处理中' : mode === 'edit' ? '保存修改' : '发表回复'}</button></div>
+  </form>
+}
+
 function PostDetail({ id, me }) {
   const [data, setData] = useState(null)
   const [content, setContent] = useState('')
+  const [replyingTo, setReplyingTo] = useState(null)
+  const [editingComment, setEditingComment] = useState(null)
+  const [composerMode, setComposerMode] = useState('reply')
   const [err, setErr] = useState('')
   const [sending, setSending] = useState(false)
-  const load = () => api(`/api/posts/${id}`).then(d => { setData(d); document.title = `${d.post.title} - 易聊社区` }).catch(e => setErr(e.message))
-  useEffect(() => { let alive = true; setData(null); setErr(''); api(`/api/posts/${id}`).then(d => { if (alive) { setData(d); document.title = `${d.post.title} - 易聊社区` } }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
-  async function comment(e) { e.preventDefault(); setErr(''); if (!content.trim()) return setErr('评论内容不能为空'); setSending(true); try { await api(`/api/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content: content.trim() }) }); setContent(''); notify('回复已发表', 'success'); load() } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) } }
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [detailReady, setDetailReady] = useState(false)
+  const editorRef = useRef(null)
+  const load = (silent = false) => api(`/api/posts/${id}`).then(d => { setData(d); document.title = `${d.post.title} - 易聊社区` }).catch(e => { if (!silent) setErr(e.message) })
+  const handleTopicEvent = useMemo(() => {
+    let timer = null
+    return msg => {
+      if (!msg?.type?.startsWith('comment_')) return
+      clearTimeout(timer)
+      timer = setTimeout(() => load(true), 120)
+    }
+  }, [id])
+  const { presence, sendTyping, sendTypingEnd, sendEditing, sendEditingEnd } = useTopicPresence(id, me, handleTopicEvent)
+  const draftKey = editingComment ? `yhdet_edit_draft_${editingComment.id}` : ''
+  useEffect(() => {
+    if (composerMode === 'edit' && editingComment?.id) sendEditing(editingComment.id)
+    return () => { if (editingComment?.id) sendEditingEnd(editingComment.id) }
+  }, [composerMode, editingComment?.id])
+  useEffect(() => {
+    if (composerMode === 'edit' && draftKey) localStorage.setItem(draftKey, content)
+  }, [composerMode, draftKey, content])
+  useEffect(() => { let alive = true; setData(null); setDetailReady(false); setErr(''); setReplyingTo(null); setEditingComment(null); setComposerMode('reply'); setEditorOpen(false); const started = Date.now(); api(`/api/posts/${id}`).then(d => { if (!alive) return; const wait = Math.max(260 - (Date.now() - started), 0); setTimeout(() => { if (alive) { setData(d); setDetailReady(true); document.title = `${d.post.title} - 易聊社区` } }, wait) }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
+  function highlightComment(commentId) {
+    const el = document.getElementById(`comment-${commentId}`)
+    if (!el) return
+    history.replaceState(null, '', `#comment-${commentId}`)
+    el.classList.remove('comment-focus')
+    void el.offsetWidth
+    el.classList.add('comment-focus')
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    setTimeout(() => el.classList.remove('comment-focus'), 2200)
+  }
+  function startReply(comment) {
+    if (comment?.quote_only && comment.jump_to_id) return highlightComment(comment.jump_to_id)
+    if (composerMode === 'edit' && content !== (editingComment?.content || '') && !confirm('当前编辑内容还没保存，确定切换到回复吗？')) return
+    setComposerMode('reply'); setEditingComment(null); setReplyingTo(comment); setEditorOpen(true); setContent(''); setTimeout(() => editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 20)
+  }
+  function startEdit(comment) {
+    if (comment.deleted) return notify('已删除的评论不能编辑', 'error')
+    if (composerMode === 'edit' && editingComment?.id !== comment.id && content !== (editingComment?.content || '') && !confirm('当前编辑内容还没保存，确定切换到另一条评论吗？')) return
+    setComposerMode('edit'); setReplyingTo(null); setEditingComment(comment); setEditorOpen(true)
+    setContent(localStorage.getItem(`yhdet_edit_draft_${comment.id}`) || comment.content || '')
+    setTimeout(() => editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 20)
+  }
+  useEffect(() => {
+    if (!data || !location.hash.startsWith('#comment-')) return
+    const targetId = location.hash.replace('#comment-', '')
+    setTimeout(() => highlightComment(targetId), 80)
+  }, [data?.comments?.length])
+  async function saveEditComment() {
+    if (!editingComment) return
+    const nextContent = content.trim()
+    if (!nextContent) return setErr('评论内容不能为空')
+    setSending(true); setErr('')
+    try {
+      await api(`/api/posts/${id}/comments/${editingComment.id}`, { method: 'PATCH', body: JSON.stringify({ content: nextContent, reply_to_comment_id: editingComment.reply_to_comment_id || null }) })
+      localStorage.removeItem(`yhdet_edit_draft_${editingComment.id}`)
+      sendEditingEnd(editingComment.id)
+      const editedId = editingComment.id
+      setContent(''); setEditingComment(null); setComposerMode('reply'); setEditorOpen(false); notify('修改已保存', 'success'); await load(); setTimeout(() => highlightComment(editedId), 80)
+    } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) }
+  }
+  async function deleteComment(comment) {
+    setErr('')
+    try {
+      await api(`/api/posts/${id}/comments/${comment.id}`, { method: 'DELETE' })
+      await load()
+    } catch (e) { setErr(e.message); notify(e.message, 'error'); throw e }
+  }
+  async function comment(e) {
+    e.preventDefault(); setErr('')
+    if (composerMode === 'edit') return saveEditComment()
+    if (!content.trim()) return setErr('评论内容不能为空')
+    setSending(true)
+    try {
+      await api(`/api/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content: content.trim(), reply_to_comment_id: replyingTo?.id || null }) })
+      sendTypingEnd()
+      setContent(''); setReplyingTo(null); setEditorOpen(false); notify('回复已发表', 'success'); await load(); setTimeout(() => location.hash = '', 10)
+    } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) }
+  }
   if (err && !data) return <><PageChrome /><div className="main-content"><div className="alert alert-error">{err}</div></div></>
-  if (!data) return <DetailSkeleton />
+  if (!data || !detailReady) return <TopicDotLoader />
   const p = data.post
   return <><PageChrome /><div className="main-content"><div className="detail-wrap">
     <div className="card animate-fadeInUp post-detail-card">
@@ -302,36 +818,125 @@ function PostDetail({ id, me }) {
             {p.role ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {p.role.includes('超级') ? p.role : p.role === '超管' ? '超级管理员' : p.role}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}
           </div>
           {p.custom_title && <span className="custom-title">{p.custom_title}</span>}
-          <div className="post-meta-item"><i className="far fa-clock" /> {p.time}</div>
+          <div className="post-meta-item"><i className="far fa-clock" /> {relativeTime(p.time)}</div>
           <div className="post-meta-item detail-counts"><i className="far fa-comment" /> {data.comments.length || ''}<span className="meta-split">|</span><i className="far fa-eye" /> {p.views || ''}</div>
         </div>
       </div>
-      <div className="card-body"><div className="markdown-body">{renderContent(p.content)}</div></div>
+      <div className="card-body"><MarkdownRenderer content={p.content} /></div>
     </div>
 
-    <div className="card animate-fadeInUp reply-card" style={{ animationDelay: '0.1s' }}>
-      <div className="card-header"><h3><i className="fas fa-comments" style={{ color: 'var(--primary)' }} /> 回复 ({data.comments.length})</h3></div>
-      <div>{data.comments.length ? data.comments.map(c => <div className="post-item reply-item" key={c.id} tabIndex={0}><div className="reply-row"><img className="post-avatar" loading="lazy" decoding="async" src={safeAvatar(c.avatar)} alt="头像" onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><a className="post-author-name" href={`/user/${c.user_id || ''}`}>{c.author}</a><span><i className="far fa-clock" /> {c.time}</span></div><div className="markdown-body reply-content"><p>{c.content}</p></div></div></div></div>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>暂无回复，来说点什么吧</p></div>}</div>
-    </div>
+    <section className="card animate-fadeInUp reply-card forum-comments" style={{ animationDelay: '0.1s' }}>
+      <div className="card-header comments-header"><div className="comments-title-row"><h3><i className="fas fa-comments" style={{ color: 'var(--primary)' }} /> 评论 <span>{data.comments.length}</span></h3><PresenceBar presence={presence} /></div><PresenceActivity presence={presence} /></div>
+      <CommentList comments={data.comments} onReply={startReply} onEdit={startEdit} onDelete={deleteComment} onJump={highlightComment} />
+    </section>
 
-    <div className="card animate-fadeInUp" style={{ animationDelay: '0.2s' }}>
-      <div className="card-body reply-form-body">{err && <div className="alert alert-error">{err}</div>}{me ? <form onSubmit={comment}><textarea className="form-textarea" required maxLength={2000} value={content} onChange={e => setContent(e.target.value)} placeholder="写下你的回复" /><button className="btn btn-primary" style={{ marginTop: 10 }} disabled={sending}><i className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} /> {sending ? '发送中' : '发表回复'}</button></form> : <><p>登录后即可发表回复</p><a className="btn btn-primary" href="/login"><i className="fas fa-right-to-bracket" /> 去登录</a></>}</div>
+    <div ref={editorRef} className={`comment-composer-dock ${editorOpen ? 'open' : 'collapsed'}`}>
+      {!editorOpen ? <button type="button" className="composer-toggle" onClick={() => { setComposerMode('reply'); setEditingComment(null); setReplyingTo(null); setContent(''); setEditorOpen(true); setTimeout(() => editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 20) }}><i className="fas fa-reply" /> {me ? '回复帖子' : '登录后回复'}</button> : <div className="card comment-editor-card"><div className="card-body"><div className="composer-head"><strong>{composerMode === 'edit' ? `编辑评论 #${editingComment?.id}` : replyingTo ? `回复 @${replyingTo.author}` : '回复帖子'}</strong><button type="button" onClick={() => { sendTypingEnd(); if (editingComment?.id) sendEditingEnd(editingComment.id); setEditorOpen(false); setReplyingTo(null); setEditingComment(null); setComposerMode('reply') }}><i className="fas fa-chevron-down" /> 收起</button></div>{replyingTo?.deleted && <div className="reply-deleted-note">你正在回复的评论已被删除。</div>}<CommentEditor me={me} mode={composerMode} editingComment={editingComment} content={content} setContent={setContent} replyingTo={replyingTo} onCancelReply={() => setReplyingTo(null)} onJump={highlightComment} onSubmit={comment} sending={sending} err={err} onTyping={sendTyping} onTypingEnd={sendTypingEnd} onCancelEdit={() => { if (editingComment?.id) sendEditingEnd(editingComment.id); setEditingComment(null); setComposerMode('reply'); setContent('') }} /></div></div>}
     </div>
 
     <div className="back-home"><a className="btn btn-secondary" href="/"><i className="fas fa-arrow-left" /> 返回首页</a></div>
   </div></div></>
 }
 
-function UserPage({ id }) {
+function AvatarUploader({ onDone }) {
+  const [open, setOpen] = useState(false)
+  const [file, setFile] = useState(null)
+  const [preview, setPreview] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [crop, setCrop] = useState({ x: 50, y: 50, size: 220 })
+  const imgRef = useRef(null)
+  const pick = f => { if (!f) return; setFile(f); setPreview(URL.createObjectURL(f)); setCrop({ x: 50, y: 50, size: 220 }) }
+  const clampCrop = next => setCrop(c => ({
+    x: Math.max(0, Math.min(260 - next.size, next.x)),
+    y: Math.max(0, Math.min(260 - next.size, next.y)),
+    size: Math.max(80, Math.min(260, next.size)),
+  }))
+  function croppedBlob() {
+    return new Promise(resolve => {
+      const img = imgRef.current
+      if (!img || !preview) return resolve(file)
+      const box = img.getBoundingClientRect()
+      const sx = crop.x / box.width * img.naturalWidth
+      const sy = crop.y / box.height * img.naturalHeight
+      const ss = crop.size / box.width * img.naturalWidth
+      const canvas = document.createElement('canvas')
+      canvas.width = 512; canvas.height = 512
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(img, sx, sy, ss, ss, 0, 0, 512, 512)
+      canvas.toBlob(b => resolve(b || file), 'image/png', 0.92)
+    })
+  }
+  async function upload() {
+    if (!file) return notify('请先选择头像', 'error')
+    setBusy(true)
+    try {
+      const blob = await croppedBlob()
+      const fd = new FormData(); fd.append('file', blob, 'avatar.png')
+      const res = await api('/api/me/avatar', { method:'POST', body: fd })
+      localStorage.setItem('yhdet_user', JSON.stringify(res.user)); notify('头像已更新', 'success'); setOpen(false); onDone?.(res.user)
+    }
+    catch(e) { notify(e.message, 'error') } finally { setBusy(false) }
+  }
+  return <>
+    <button className="avatar-edit-btn" onClick={() => setOpen(true)} title="编辑头像"><i className="fas fa-pen" /></button>
+    {open && <div className="modal-mask full-avatar-mask" onClick={() => setOpen(false)}><div className="avatar-modal avatar-crop-modal" onClick={e => e.stopPropagation()}><h3><i className="fas fa-crop-simple" /> 上传并裁剪头像</h3><div className="drop-zone" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); pick(e.dataTransfer.files?.[0]) }}><input type="file" accept="image/*" onChange={e => pick(e.target.files?.[0])} /><p>点击选择或拖入图片</p><small>选择后拖动滑块裁剪正方形区域</small></div>{preview && <div className="crop-stage"><img ref={imgRef} className="crop-image" src={preview} alt="裁剪" /><div className="crop-box" style={{ left: crop.x, top: crop.y, width: crop.size, height: crop.size }} /></div>}{preview && <div className="crop-controls"><label>左右 <input type="range" min="0" max={Math.max(0, 260 - crop.size)} value={crop.x} onChange={e => clampCrop({ ...crop, x: Number(e.target.value) })} /></label><label>上下 <input type="range" min="0" max={Math.max(0, 260 - crop.size)} value={crop.y} onChange={e => clampCrop({ ...crop, y: Number(e.target.value) })} /></label><label>大小 <input type="range" min="80" max="260" value={crop.size} onChange={e => clampCrop({ ...crop, size: Number(e.target.value) })} /></label></div>}<div className="admin-actions"><button className="btn btn-primary" disabled={busy || !file} onClick={upload}>{busy ? '上传中' : '保存头像'}</button><button className="btn btn-secondary" onClick={() => setOpen(false)}>取消</button></div></div></div>}
+  </>
+}
+
+function UserPage({ id, me, setMe }) {
   const [data, setData] = useState(null)
-  useEffect(() => { let alive = true; setData(null); api(`/api/users/${id}`).then(d => { if (alive) { setData(d); document.title = `${d.user.username} 的主页 - 易聊社区` } }); return () => { alive = false } }, [id])
+  const [postsPage, setPostsPage] = useState(1)
+  const [commentsPage, setCommentsPage] = useState(1)
+  const [sentCommentsPage, setSentCommentsPage] = useState(1)
+  const [loadingPosts, setLoadingPosts] = useState(false)
+  const [loadingComments, setLoadingComments] = useState(false)
+  const [loadingSentComments, setLoadingSentComments] = useState(false)
+  const [showPosts, setShowPosts] = useState(true)
+  const [showComments, setShowComments] = useState(true)
+  const [showSentComments, setShowSentComments] = useState(true)
+  const isMe = me && String(me.id) === String(id)
+  const fetchUser = (pp = 1, cp = 1, scp = 1) => api(`/api/users/${id}?posts_page=${pp}&comments_page=${cp}&sent_comments_page=${scp}&page_size=10`)
+  useEffect(() => { let alive = true; setData(null); setPostsPage(1); setCommentsPage(1); setSentCommentsPage(1); fetchUser(1,1,1).then(d => { if (alive) { setData(d); document.title = `${d.user.username} 的主页 - 易聊社区`; if (location.hash === '#comments') setShowComments(true) } }); return () => { alive = false } }, [id])
+  useEffect(() => { if (!isMe) return; const t = setInterval(() => fetchUser(1,1,1).then(d => setData(old => old ? { ...old, unread_notifications: d.unread_notifications } : d)).catch(()=>{}), 5000); return () => clearInterval(t) }, [id, isMe])
   if (!data) return <DetailSkeleton />
   const u = data.user
+  const avatarDone = user => { setMe?.(user); setData(d => ({ ...d, user })); }
+  async function morePosts() {
+    if (!data.posts_has_more || loadingPosts) return
+    setLoadingPosts(true)
+    try { const np = postsPage + 1; const d = await fetchUser(np, commentsPage, sentCommentsPage); setPostsPage(np); setData(old => ({ ...d, posts: [...(old?.posts || []), ...(d.posts || [])], received_comments: old?.received_comments || d.received_comments, sent_comments: old?.sent_comments || d.sent_comments })) } finally { setLoadingPosts(false) }
+  }
+  async function moreComments() {
+    if (!data.received_comments_has_more || loadingComments) return
+    setLoadingComments(true)
+    try { const np = commentsPage + 1; const d = await fetchUser(postsPage, np, sentCommentsPage); setCommentsPage(np); setData(old => ({ ...d, posts: old?.posts || d.posts, received_comments: [...(old?.received_comments || []), ...(d.received_comments || [])], sent_comments: old?.sent_comments || d.sent_comments })) } finally { setLoadingComments(false) }
+  }
+  async function moreSentComments() {
+    if (!data.sent_comments_has_more || loadingSentComments) return
+    setLoadingSentComments(true)
+    try { const np = sentCommentsPage + 1; const d = await fetchUser(postsPage, commentsPage, np); setSentCommentsPage(np); setData(old => ({ ...d, posts: old?.posts || d.posts, received_comments: old?.received_comments || d.received_comments, sent_comments: [...(old?.sent_comments || []), ...(d.sent_comments || [])] })) } finally { setLoadingSentComments(false) }
+  }
+  async function readOne(c) {
+    if (!isMe || !c.notification_id || c.read) return navigate(`/post/${c.post_id}#comment-${c.id}`)
+    try {
+      const res = await api(`/api/me/notifications/${c.notification_id}/read`, { method:'POST' })
+      setData(d => ({ ...d, unread_notifications: res.unread ?? Math.max(0, (d.unread_notifications || 0)-1), received_comments: d.received_comments.map(x => x.id === c.id ? { ...x, read: true } : x) }))
+      window.dispatchEvent(new Event('notifications:refresh'))
+    } finally { navigate(`/post/${c.post_id}#comment-${c.id}`) }
+  }
+  async function readAll() {
+    if (!isMe) return
+    const res = await api('/api/me/notifications/read', { method:'POST', body: JSON.stringify({}) })
+    setData(d => ({ ...d, unread_notifications: res.unread || 0, received_comments: d.received_comments.map(x => ({ ...x, read: true })) }))
+    window.dispatchEvent(new Event('notifications:refresh'))
+  }
   return <><PageChrome /><div className="main-content"><div className="detail-wrap">
     <div className="card animate-fadeInUp user-profile-card">
-      <div className="card-body user-profile-body"><img className="profile-avatar" loading="lazy" decoding="async" src={safeAvatar(u.avatar)} alt="头像" onError={onAvatarError} /><h2>{u.username}</h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div>
+      <div className="card-body user-profile-body"><div className="profile-head-row"><div className="avatar-wrap"><img className="profile-avatar" loading="lazy" decoding="async" src={safeAvatar(u.avatar)} alt="头像" onError={onAvatarError} />{isMe && <AvatarUploader onDone={avatarDone} />}</div><div className="profile-title-block"><h2 className="profile-name-with-badge">{u.username}</h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div></div><ProfileStats stats={data.profile_stats} /></div>
     </div>
-    <div className="card animate-fadeInUp" style={{ animationDelay: '0.1s' }}><div className="card-header"><h3><i className="fas fa-pen-nib" style={{ color: 'var(--primary)' }} /> TA 的帖子</h3></div><div>{data.posts.length ? data.posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-feather-pointed" /><p>TA 还没有发表过帖子</p></div>}</div></div>
+    <div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-pen-nib" style={{ color: 'var(--primary)' }} /> TA 的帖子 <span className="mini-busy">{data.posts_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowPosts(!showPosts)}>{showPosts ? '折叠' : '展开'}</button></div>{showPosts && <div>{data.posts.length ? data.posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-feather-pointed" /><p>TA 还没有发表过帖子</p></div>}{data.posts_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={morePosts} disabled={loadingPosts}>{loadingPosts ? '加载中...' : '加载更多帖子'}</button></div>}</div>}</div>
+    {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.1s' }}><div className="card-header fold-head"><h3><i className="fas fa-message" style={{ color: 'var(--secondary)' }} /> 被评论消息 {data.unread_notifications > 0 && <span className="bubble-badge red-badge inline-bubble">{data.unread_notifications > 99 ? '99+' : data.unread_notifications}</span>}</h3><div className="admin-actions">{data.unread_notifications > 0 && <button className="btn btn-sm btn-secondary" onClick={readAll}>全部已读</button>}<button className="btn btn-sm btn-secondary" onClick={() => setShowComments(!showComments)}>{showComments ? '折叠' : '展开'}</button></div></div>{showComments && <div>{data.received_comments?.length ? data.received_comments.map(c => <button className={`post-item notification-row ${!c.read ? 'is-unread' : ''}`} onClick={() => readOne(c)} key={c.id}><div className="reply-row"><img className="post-avatar" src={safeAvatar(c.avatar)} onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><b>{c.author} 评论了你的帖子</b><span>{relativeTime(c.time)}</span></div><div className="post-preview">《{c.post_title}》</div></div>{!c.read && <span className="unread-dot" />}</div></button>) : <div className="empty-state"><i className="fas fa-comment-slash" /><p>暂无被评论消息</p></div>}{data.received_comments_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreComments} disabled={loadingComments}>{loadingComments ? '加载中...' : '加载更多评论'}</button></div>}</div>}</div>}
+    {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.12s' }}><div className="card-header fold-head"><h3><i className="fas fa-paper-plane" style={{ color: '#16a34a' }} /> 我发出的评论 <span className="mini-busy">{data.sent_comments_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowSentComments(!showSentComments)}>{showSentComments ? '折叠' : '展开'}</button></div>{showSentComments && <div>{data.sent_comments?.length ? data.sent_comments.map(c => <a className="post-item notification-row sent-comment-row" href={`/post/${c.post_id}#comment-${c.id}`} key={c.id}><div className="reply-row"><img className="post-avatar" src={safeAvatar(c.owner_avatar)} onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><b>回复了 {c.owner_name} 的帖子</b><span>{relativeTime(c.time)}</span></div><div className="post-preview">《{c.post_title}》</div><div className="sent-comment-content">{c.content}</div></div></div></a>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>还没有发出过评论</p></div>}{data.sent_comments_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreSentComments} disabled={loadingSentComments}>{loadingSentComments ? '加载中...' : '加载更多发出的评论'}</button></div>}</div>}</div>}
     <div className="back-home"><a className="btn btn-secondary" href="/"><i className="fas fa-arrow-left" /> 返回首页</a></div>
   </div></div></>
 }
@@ -352,6 +957,7 @@ function AdminPage({ me }) {
     ['announcements', '公告', 'fa-bullhorn'],
     ['donors', '捐赠者', 'fa-heart'],
     ['channels', '频道', 'fa-broadcast-tower'],
+    ['settings', '系统设置', 'fa-gear'],
   ]
   const [tab, setTab] = useState('overview')
   const [data, setData] = useState({})
@@ -393,7 +999,8 @@ function AdminPage({ me }) {
     {tab === 'users' && <AdminUsers items={items} run={run} />}
     {tab === 'announcements' && <AdminAnnouncements items={items} draft={draft} setDraft={setDraft} run={run} />}
     {tab === 'donors' && <AdminDonors items={items} draft={draft} setDraft={setDraft} run={run} />}
-    {tab === 'channels' && <AdminChannels data={data.channels} draft={draft} setDraft={setDraft} run={run} />} 
+    {tab === 'channels' && <AdminChannels data={data.channels} draft={draft} setDraft={setDraft} run={run} />}
+    {tab === 'settings' && <AdminSettings data={data.settings} draft={draft} setDraft={setDraft} run={run} />} 
   </div>
 }
 
@@ -404,16 +1011,106 @@ function AdminOverview({ data }) {
   </div><div className="admin-grid"><div className="admin-card"><h3>最新帖子</h3>{data?.recent_posts?.map(p => <div className="admin-line" key={p.id}><span>{p.title}</span><a href={`/post/${p.id}`}>查看</a></div>)}</div><div className="admin-card"><h3>新用户</h3>{data?.recent_users?.map(u => <div className="admin-line" key={u.id}><span>{u.username}</span><span>{u.role === 'admin' ? '管理员' : '用户'}</span></div>)}</div></div></>
 }
 function AdminPosts({ items, run }) { return <div className="admin-card"><h3>帖子管理</h3>{items.map(p => <div className="admin-row" key={p.id}><div><b>{p.title}</b><p>{p.author} · {p.time} · 评论 {p.comments || 0} · 浏览 {p.views || 0}</p></div><div className="admin-actions"><button className="btn btn-sm btn-secondary" onClick={() => run(() => api(`/api/admin/posts/${p.id}`, { method:'PATCH', body: JSON.stringify({ pinned: !p.pinned }) }))}>{p.pinned ? '取消置顶' : '置顶'}</button><a className="btn btn-sm btn-secondary" href={`/post/${p.id}`}>查看</a><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除这个帖子及其评论？') && run(() => api(`/api/admin/posts/${p.id}`, { method:'DELETE' }))}>删除</button></div></div>)}</div> }
-function AdminComments({ items, run }) { return <div className="admin-card"><h3>评论管理</h3>{items.map(c => <div className="admin-row" key={c.id}><div><b>{c.author}</b><p>{c.content}</p><small>来自《{c.post_title}》 · {c.created_at}</small></div><div className="admin-actions"><a className="btn btn-sm btn-secondary" href={`/post/${c.post_id}`}>查看帖子</a><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除这条评论？') && run(() => api(`/api/admin/comments/${c.id}`, { method:'DELETE' }))}>删除</button></div></div>)}</div> }
-function AdminUsers({ items, run }) { return <div className="admin-card"><h3>用户管理</h3>{items.map(u => <div className="admin-row" key={u.id}><div><b>{u.username}</b><p>{u.role === 'admin' ? '管理员' : '普通用户'} · 帖子 {u.post_count || 0} · 评论 {u.comment_count || 0}</p><small>{u.role_label || '无头衔'} {u.custom_title ? ` · ${u.custom_title}` : ''}</small></div><div className="admin-actions"><button className="btn btn-sm btn-secondary" onClick={() => run(() => api(`/api/admin/users/${u.id}`, { method:'PATCH', body: JSON.stringify({ role: u.role === 'admin' ? 'user' : 'admin', role_label: u.role === 'admin' ? '' : '超管', custom_title: u.role === 'admin' ? '' : '论坛主' }) }))}>{u.role === 'admin' ? '降为用户' : '设为管理员'}</button><a className="btn btn-sm btn-secondary" href={`/user/${u.id}`}>主页</a></div></div>)}</div> }
+function AdminComments({ items, run }) { return <div className="admin-card"><h3>评论管理</h3>{items.map(c => <div className="admin-row" key={c.id}><div><b>{c.author}</b><p>{c.content}</p><small>来自《{c.post_title}》 · {relativeTime(c.created_at)}</small></div><div className="admin-actions"><a className="btn btn-sm btn-secondary" href={`/post/${c.post_id}`}>查看帖子</a><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除这条评论？') && run(() => api(`/api/admin/comments/${c.id}`, { method:'DELETE' }))}>删除</button></div></div>)}</div> }
+function AdminUsers({ items, run }) {
+  const [info, setInfo] = useState(null)
+  const [loadingInfo, setLoadingInfo] = useState(false)
+  async function openInfo(u) {
+    setLoadingInfo(true)
+    try { setInfo(await api(`/api/admin/users/${u.id}`)) }
+    catch(e) { notify(e.message, 'error') }
+    finally { setLoadingInfo(false) }
+  }
+  function freeze(u) {
+    const days = prompt(`冻结 ${u.username} 多少天？`, '7')
+    if (!days) return
+    const reason = prompt('冻结原因（会用于邮件提示，可留空）', '') || ''
+    run(() => api(`/api/admin/users/${u.id}/freeze`, { method:'POST', body: JSON.stringify({ days: Number(days), reason }) }))
+  }
+  function ban(u) {
+    const reason = prompt(`永久封禁 ${u.username} 的原因？封号不可逆，会禁止邮箱/IP，并软删除账号。`, '') || ''
+    if (!confirm(`确认永久封禁 ${u.username}？`)) return
+    run(() => api(`/api/admin/users/${u.id}/ban`, { method:'POST', body: JSON.stringify({ reason }) }))
+  }
+  function hardDelete(u) {
+    if (!confirm(`硬删除 ${u.username} 的测试数据？会删除帖子、评论、会话和账号，不能恢复。`)) return
+    run(() => api(`/api/admin/users/${u.id}/hard-delete`, { method:'DELETE', body: JSON.stringify({ confirm:'DELETE' }) }))
+  }
+  return <div className="admin-card">
+    <h3>用户管理</h3>
+    {items.map(u => <div className="admin-row" key={u.id}>
+      <div>
+        <b>{u.username}</b>
+        <p>{u.role === 'admin' ? '管理员' : '普通用户'} · {u.account_status === 'frozen' ? `冻结至 ${u.frozen_until}` : u.account_status === 'banned' ? '已封禁' : '正常'} · 帖子 {u.post_count || 0} · 评论 {u.comment_count || 0}</p>
+        <small>{u.role_label || '无头衔'} {u.custom_title ? ` · ${u.custom_title}` : ''}</small>
+      </div>
+      <div className="admin-actions">
+        <button className="btn btn-sm btn-secondary" onClick={() => openInfo(u)}>注册信息</button>
+        <button className="btn btn-sm btn-secondary" onClick={() => run(() => api(`/api/admin/users/${u.id}`, { method:'PATCH', body: JSON.stringify({ role: u.role === 'admin' ? 'user' : 'admin', role_label: u.role === 'admin' ? '' : '超管', custom_title: u.role === 'admin' ? '' : '论坛主' }) }))}>{u.role === 'admin' ? '降为用户' : '设为管理员'}</button>
+        {u.account_status === 'frozen' ? <button className="btn btn-sm btn-secondary" onClick={() => run(() => api(`/api/admin/users/${u.id}/unfreeze`, { method:'POST' }))}>解冻</button> : <button className="btn btn-sm btn-secondary" onClick={() => freeze(u)}>冻结</button>}
+        <button className="btn btn-sm btn-danger" onClick={() => ban(u)}>封号</button>
+        <button className="btn btn-sm btn-danger" onClick={() => hardDelete(u)}>硬删除</button>
+        <a className="btn btn-sm btn-secondary" href={`/user/${u.id}`}>主页</a>
+      </div>
+    </div>)}
+    {(info || loadingInfo) && <div className="modal-mask" onClick={() => setInfo(null)}>
+      <div className="avatar-modal user-info-modal" onClick={e => e.stopPropagation()}>
+        <h3><i className="fas fa-id-card" /> 用户注册信息</h3>
+        {loadingInfo && <p>加载中...</p>}
+        {info?.user && <div className="settings-grid">
+          <label><span>用户名</span><input className="form-input" readOnly value={info.user.username || ''} /></label>
+          <label><span>邮箱</span><input className="form-input" readOnly value={info.user.email || ''} /></label>
+          <label><span>注册时间</span><input className="form-input" readOnly value={info.user.created_at || ''} /></label>
+          <label><span>注册 IP</span><input className="form-input" readOnly value={info.user.register_ip || ''} /></label>
+          <label><span>最后登录 IP</span><input className="form-input" readOnly value={info.user.last_login_ip || ''} /></label>
+          <label><span>账号状态</span><input className="form-input" readOnly value={info.user.account_status || 'active'} /></label>
+          <label className="settings-wide"><span>封禁原因</span><textarea className="form-textarea" readOnly value={info.user.ban_reason || ''} /></label>
+        </div>}
+        {info?.bans?.length > 0 && <div className="alert alert-info">封禁留档：{info.bans.map(b => `${b.banned_at} · ${b.ip || '无IP'} · ${b.reason || '无原因'}`).join(' / ')}</div>}
+        <div className="admin-actions"><button className="btn btn-secondary" onClick={() => setInfo(null)}>关闭</button></div>
+      </div>
+    </div>}
+  </div>
+}
 function AdminAnnouncements({ items, draft, setDraft, run }) { return <div className="admin-card"><h3>公告管理</h3><div className="admin-create"><input className="form-input" placeholder="新公告内容" value={draft.announcement || ''} onChange={e => setDraft({ ...draft, announcement: e.target.value })} /><button className="btn btn-primary" onClick={() => draft.announcement?.trim() && run(() => api('/api/admin/announcements', { method:'POST', body: JSON.stringify({ content: draft.announcement.trim() }) }).then(() => setDraft({ ...draft, announcement: '' })))}>发布公告</button></div>{items.map(a => <div className="admin-row" key={a.id}><div><b>{a.content}</b><p>{a.author} · {a.created_at}</p></div><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除公告？') && run(() => api(`/api/admin/announcements/${a.id}`, { method:'DELETE' }))}>删除</button></div>)}</div> }
 function AdminDonors({ items, draft, setDraft, run }) { const d = draft.donor || {}; return <div className="admin-card"><h3>捐赠者管理</h3><div className="admin-create donor-create"><input className="form-input" placeholder="名称" value={d.name || ''} onChange={e => setDraft({ ...draft, donor: { ...d, name: e.target.value } })} /><input className="form-input" placeholder="金额，如 3元" value={d.amount || ''} onChange={e => setDraft({ ...draft, donor: { ...d, amount: e.target.value } })} /><input className="form-input" placeholder="日期，如 2026.6.29" value={d.donated_at || ''} onChange={e => setDraft({ ...draft, donor: { ...d, donated_at: e.target.value } })} /><button className="btn btn-primary" onClick={() => d.name?.trim() && d.amount?.trim() && d.donated_at?.trim() && run(() => api('/api/admin/donors', { method:'POST', body: JSON.stringify({ name: d.name.trim(), amount: d.amount.trim(), donated_at: d.donated_at.trim() }) }).then(() => setDraft({ ...draft, donor: {} })))}>添加</button></div>{items.map(x => <div className="admin-row" key={x.id}><div><b>{x.name}</b><p>{x.amount} · {x.donated_at}</p></div><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除捐赠记录？') && run(() => api(`/api/admin/donors/${x.id}`, { method:'DELETE' }))}>删除</button></div>)}</div> }
+
+
+function AdminSettings({ data, draft, setDraft, run }) {
+  const s = draft.settings || data?.settings || {}
+  const set = (k, v) => setDraft({ ...draft, settings: { ...s, [k]: v } })
+  const save = () => run(() => api('/api/admin/settings', { method:'PUT', body: JSON.stringify(s) }).then(() => { chromeCache = null; chromePromise = null }))
+  return <div className="admin-card"><h3><i className="fas fa-gear" /> 系统设置</h3>
+    <div className="settings-grid">
+      <label><span>网站名字</span><input className="form-input" value={s.site_name || ''} placeholder="易聊社区" onChange={e => set('site_name', e.target.value)} /></label>
+      <label><span>网站 Logo URL</span><input className="form-input" value={s.site_logo || ''} placeholder="/uploads/logo.png 或 https://..." onChange={e => set('site_logo', e.target.value)} /></label>
+      <label><span>默认用户头像</span><input className="form-input" value={s.default_avatar || ''} placeholder="新用户默认头像 URL" onChange={e => set('default_avatar', e.target.value)} /></label>
+      <label><span>邮件通知</span><select className="form-select" value={s.email_enabled ? '1' : '0'} onChange={e => set('email_enabled', e.target.value === '1')}><option value="0">关闭</option><option value="1">开启</option></select></label>
+      <label><span>SMTP Host</span><input className="form-input" value={s.smtp_host || ''} onChange={e => set('smtp_host', e.target.value)} /></label>
+      <label><span>SMTP Port</span><input className="form-input" type="number" value={s.smtp_port || 465} onChange={e => set('smtp_port', Number(e.target.value || 465))} /></label>
+      <label><span>SMTP 用户</span><input className="form-input" value={s.smtp_user || ''} onChange={e => set('smtp_user', e.target.value)} /></label>
+      <label><span>SMTP 密码</span><input className="form-input" type="password" value={s.smtp_password || ''} placeholder="留空或 *** 表示不修改" onChange={e => set('smtp_password', e.target.value)} /></label>
+      <label><span>发件人</span><input className="form-input" value={s.smtp_from || ''} onChange={e => set('smtp_from', e.target.value)} /></label>
+      <label><span>同一帖子24小时邮件上限</span><input className="form-input" type="number" min="0" max="100" value={s.comment_email_limit_24h ?? 8} onChange={e => set('comment_email_limit_24h', Number(e.target.value || 0))} /></label>
+      <label className="settings-wide"><span>首页跑马灯 JSON</span><textarea className="form-textarea" value={s.banners_json || ''} placeholder='[{"tag":"HOT","content":"欢迎加入易聊社区","color":"cyan"}]' onChange={e => set('banners_json', e.target.value)} /></label>
+    </div>
+    <div className="alert alert-info">跑马灯支持 tag/content/color；被评论会生成红色站内气泡，点击单条后红点消失，也可全部已读。</div>
+    <div className="admin-actions settings-actions"><button className="btn btn-primary" onClick={save}>保存系统设置</button></div>
+  </div>
+}
 
 
 function ChannelsPage() {
   const [data, setData] = useState(null)
   const [err, setErr] = useState('')
-  useEffect(() => { document.title = '频道 - 易聊社区'; let alive = true; api('/api/channels').then(d => alive && setData(d)).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [])
+  useEffect(() => {
+    document.title = '频道 - 易聊社区'
+    let alive = true
+    const loadChannels = () => api('/api/channels').then(d => alive && setData(d)).catch(e => { if (alive) { setErr(e.message); if (e.message === '请先登录') clearInterval(timer) } })
+    loadChannels()
+    const timer = setInterval(() => { if (!document.hidden && !err) loadChannels() }, 15000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [])
   if (!data && !err) return <HomeSkeleton />
   return <><PageChrome /><div className="main-content"><div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-broadcast-tower" style={{ color: 'var(--primary)' }} /> 频道</h3></div>{err && <div className="card-body"><div className="alert alert-error">{err}</div></div>}<div className="channel-grid">{data?.items?.length ? data.items.map(ch => <a className="channel-card" href={`/channels/${ch.slug}`} key={ch.id}><div className="channel-icon"><i className="fas fa-broadcast-tower" /></div><div><h3>{ch.name}</h3><p>{ch.description || '管理员频道'}</p><span>{ch.post_count || 0} 条内容 · {ch.mode === 'api' ? '接口对接' : '手动发布'}</span></div></a>) : <div className="empty-state"><i className="fas fa-satellite-dish" /><p>暂无频道</p></div>}</div></div></div></>
 }
@@ -421,10 +1118,26 @@ function ChannelsPage() {
 function ChannelDetail({ slug }) {
   const [data, setData] = useState(null)
   const [err, setErr] = useState('')
-  useEffect(() => { let alive = true; setData(null); setErr(''); api(`/api/channels/${slug}/posts`).then(d => { if (alive) { setData(d); document.title = `${d.channel.name} - 频道` } }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [slug])
+  useEffect(() => {
+    let alive = true
+    setData(null); setErr('')
+    const loadChannelPosts = (silent = false) => api(`/api/channels/${slug}/posts`).then(d => { if (alive) { setData(d); document.title = `${d.channel.name} - 频道` } }).catch(e => { if (alive && !silent) setErr(e.message) })
+    loadChannelPosts(false)
+    const timer = setInterval(() => { if (!document.hidden) loadChannelPosts(true) }, 10000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [slug])
   if (!data && !err) return <HomeSkeleton />
   if (err) return <><PageChrome /><div className="main-content"><div className="alert alert-error">{err}</div></div></>
-  return <><PageChrome /><div className="main-content"><div className="detail-wrap"><div className="channel-hero card"><div className="card-body"><span className="channel-pill">频道</span><h1>{data.channel.name}</h1><p>{data.channel.description || '频道内容由管理员发布，用户可浏览和评论。'}</p></div></div><div className="card"><div className="card-header"><h3><i className="fas fa-list" /> 最新内容</h3></div>{data.items.length ? data.items.map(p => <a className="post-item" style={{ display:'block', textDecoration:'none' }} href={`/channel-post/${p.id}`} key={p.id}><div className="post-title">{p.title}</div><div className="post-preview">{htmlText(p.preview)}</div><div className="post-meta"><span><i className="fas fa-user-shield" /> {p.author_name || '管理员'}</span><span><i className="far fa-clock" /> {p.time}</span><span><i className="far fa-comment" /> {p.comments || 0}</span><span><i className="far fa-eye" /> {p.views || 0}</span></div></a>) : <div className="empty-state"><i className="fas fa-inbox" /><p>这个频道暂时没有内容</p></div>}</div><div className="back-home"><a className="btn btn-secondary" href="/channels"><i className="fas fa-arrow-left" /> 返回频道</a></div></div></div></>
+  return <><PageChrome /><div className="main-content"><div className="detail-wrap">
+    <div className="channel-hero card"><div className="card-body"><span className="channel-pill">频道</span><h1>{data.channel.name}</h1><p>{data.channel.description || '频道内容由管理员发布，用户可浏览和评论。'}</p></div></div>
+    <div className="card"><div className="card-header"><h3><i className="fas fa-list" /> 最新内容</h3></div>
+      {data.items.length ? data.items.map((p, idx) => <div className="post-item channel-post-row" key={p.id}>
+        <a className="channel-post-main" href={`/channel-post/${p.id}`}><div className="post-title">{p.title}</div><div className="post-preview">{htmlText(p.preview)}</div></a>
+        <div className="post-meta"><span><i className="fas fa-user-shield" /> {p.author_name || '管理员'}</span><span><i className="far fa-clock" /> {relativeTime(p.time)}</span><span><i className="far fa-comment" /> {p.comments || 0}</span><span><i className="far fa-eye" /> {p.views || 0}</span>{p.external_url && <a className="source-link inline-source" href={p.external_url} target="_blank" rel="noreferrer"><i className="fas fa-arrow-up-right-from-square" /> {sourceLinkLabel(p.external_url)}</a>}</div>
+      </div>) : <div className="empty-state"><i className="fas fa-inbox" /><p>这个频道暂时没有内容</p></div>}
+    </div>
+    <div className="back-home"><a className="btn btn-secondary" href="/channels"><i className="fas fa-arrow-left" /> 返回频道</a></div>
+  </div></div></>
 }
 
 function ChannelPostDetail({ id, me }) {
@@ -438,18 +1151,41 @@ function ChannelPostDetail({ id, me }) {
   if (err && !data) return <><PageChrome /><div className="main-content"><div className="alert alert-error">{err}</div></div></>
   if (!data) return <DetailSkeleton />
   const p = data.post
-  return <><PageChrome /><div className="main-content"><div className="detail-wrap"><div className="card animate-fadeInUp post-detail-card"><div className="card-header post-detail-header"><span className="channel-pill">{p.channel_name}</span><h2>{p.title}</h2><div className="post-meta detail-meta"><div className="post-meta-item"><i className="fas fa-user-shield" /> {p.author_name || '管理员'}</div><div className="post-meta-item"><i className="far fa-clock" /> {p.time}</div><div className="post-meta-item detail-counts"><i className="far fa-comment" /> {data.comments.length || 0}<span className="meta-split">|</span><i className="far fa-eye" /> {p.views || 0}</div></div></div><div className="card-body"><div className="markdown-body">{renderContent(p.content)}</div>{p.external_url && <a className="source-link" href={p.external_url} target="_blank" rel="noreferrer">查看来源</a>}</div></div><div className="card animate-fadeInUp reply-card"><div className="card-header"><h3><i className="fas fa-comments" /> 评论 ({data.comments.length})</h3></div><div>{data.comments.length ? data.comments.map(c => <div className="post-item reply-item" key={c.id}><div className="reply-row"><img className="post-avatar" loading="lazy" decoding="async" src={safeAvatar(c.avatar)} alt="头像" onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><a className="post-author-name" href={`/user/${c.user_id || ''}`}>{c.author}</a><span><i className="far fa-clock" /> {c.time}</span></div><div className="markdown-body reply-content"><p>{c.content}</p></div></div></div></div>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>暂无评论</p></div>}</div></div><div className="card"><div className="card-body reply-form-body">{err && <div className="alert alert-error">{err}</div>}{me ? <form onSubmit={comment}><textarea className="form-textarea" required maxLength={2000} value={content} onChange={e => setContent(e.target.value)} placeholder="写下你的评论" /><button className="btn btn-primary" style={{ marginTop: 10 }} disabled={sending}><i className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} /> {sending ? '发送中' : '发表评论'}</button></form> : <><p>登录后即可发表评论</p><a className="btn btn-primary" href="/login"><i className="fas fa-right-to-bracket" /> 去登录</a></>}</div></div><div className="back-home"><a className="btn btn-secondary" href={`/channels/${p.channel_slug}`}><i className="fas fa-arrow-left" /> 返回频道</a></div></div></div></>
+  return <><PageChrome /><div className="main-content"><div className="detail-wrap">
+    <div className="card animate-fadeInUp post-detail-card"><div className="card-header post-detail-header"><span className="channel-pill">{p.channel_name}</span><h2>{p.title}</h2><div className="post-meta detail-meta"><div className="post-meta-item"><i className="fas fa-user-shield" /> {p.author_name || '管理员'}</div><div className="post-meta-item"><i className="far fa-clock" /> {relativeTime(p.time)}</div><div className="post-meta-item detail-counts"><i className="far fa-comment" /> {data.comments.length || 0}<span className="meta-split">|</span><i className="far fa-eye" /> {p.views || 0}</div></div></div><div className="card-body"><div className="markdown-body">{renderContent(p.content)}</div>{p.external_url && <a className="source-link" href={p.external_url} target="_blank" rel="noreferrer"><i className="fas fa-arrow-up-right-from-square" /> {sourceLinkLabel(p.external_url)}</a>}</div></div>
+    <div className="card animate-fadeInUp reply-card"><div className="card-header"><h3><i className="fas fa-comments" /> 评论 ({data.comments.length})</h3></div><div>{data.comments.length ? data.comments.map(c => <div className="post-item reply-item" key={c.id}><div className="reply-row"><img className="post-avatar" loading="lazy" decoding="async" src={safeAvatar(c.avatar)} alt="头像" onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><a className="post-author-name" href={`/user/${c.user_id || ''}`}>{c.author}</a><span><i className="far fa-clock" /> {relativeTime(c.time)}</span></div><div className="markdown-body reply-content"><p>{c.content}</p></div></div></div></div>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>暂无评论</p></div>}</div></div>
+    <div className="card"><div className="card-body reply-form-body">{err && <div className="alert alert-error">{err}</div>}{me ? <form onSubmit={comment}><textarea className="form-textarea" required maxLength={2000} value={content} onChange={e => setContent(e.target.value)} placeholder="写下你的评论" /><button className="btn btn-primary" style={{ marginTop: 10 }} disabled={sending}><i className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} /> {sending ? '发送中' : '发表评论'}</button></form> : <><p>登录后即可评论</p><a className="btn btn-primary" href="/login"><i className="fas fa-right-to-bracket" /> 去登录</a></>}</div></div>
+    <div className="back-home"><a className="btn btn-secondary" href={`/channels/${p.channel_slug}`}><i className="fas fa-arrow-left" /> 返回频道</a></div>
+  </div></div></>
 }
 
 function AdminChannels({ data, draft, setDraft, run }) {
   const channels = data?.items || []
   const posts = data?.posts || []
-  const ch = draft.channel || { name:'', slug:'', description:'', mode:'manual', enabled:true, source_type:'telegram', endpoint_url:'', auth_type:'none', auth_secret_ref:'', mapping_json:'{}' }
+  const emptyChannel = { name:'', slug:'', description:'', mode:'manual', enabled:true, source_type:'telegram', endpoint_url:'', auth_type:'bearer', auth_secret_ref:'TG_MONITOR_API_KEY', mapping_json:'{}' }
+  const ch = draft.channel || emptyChannel
+  const editing = Boolean(ch.id)
   const post = draft.channelPost || { channel_id: channels[0]?.id || '', title:'', content:'', author_name:'管理员', external_url:'' }
-  const saveChannel = () => run(() => api('/api/admin/channels', { method:'POST', body: JSON.stringify(ch) }).then(() => setDraft({ ...draft, channel: undefined })))
+  const editChannel = (c) => setDraft({ ...draft, channel: { ...c, auth_secret_ref: c.auth_secret_ref && c.auth_secret_ref !== '***' ? c.auth_secret_ref : (c.mode === 'api' ? 'TG_MONITOR_API_KEY' : '') } })
+  const resetChannel = () => setDraft({ ...draft, channel: emptyChannel })
+  const saveChannel = () => run(() => api(editing ? `/api/admin/channels/${ch.id}` : '/api/admin/channels', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(ch) }).then(() => setDraft({ ...draft, channel: emptyChannel })))
   const publish = () => run(() => api(`/api/admin/channels/${post.channel_id}/posts`, { method:'POST', body: JSON.stringify(post) }).then(() => setDraft({ ...draft, channelPost: undefined })))
-  return <div className="admin-card"><h3>频道管理</h3><div className="admin-create channel-create"><input className="form-input" placeholder="频道名，如 linux.do" value={ch.name || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, name: e.target.value, slug: ch.slug || e.target.value.toLowerCase().replace(/\s+/g,'-') } })} /><input className="form-input" placeholder="slug，如 linux-do" value={ch.slug || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, slug: e.target.value } })} /><select className="form-select" value={ch.mode || 'manual'} onChange={e => setDraft({ ...draft, channel: { ...ch, mode: e.target.value } })}><option value="manual">手动发帖</option><option value="api">接口对接</option></select><button className="btn btn-primary" onClick={saveChannel} disabled={!ch.name?.trim() || !ch.slug?.trim()}>创建频道</button><textarea className="form-textarea channel-desc" placeholder="频道说明" value={ch.description || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, description: e.target.value } })} />{ch.mode === 'api' && <><input className="form-input" placeholder="接口地址" value={ch.endpoint_url || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, endpoint_url: e.target.value } })} /><input className="form-input" placeholder="凭据引用名（不填明文密钥）" value={ch.auth_secret_ref || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, auth_secret_ref: e.target.value } })} /></>}</div><div className="admin-create channel-post-create"><select className="form-select" value={post.channel_id || ''} onChange={e => setDraft({ ...draft, channelPost: { ...post, channel_id: e.target.value } })}>{channels.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select><input className="form-input" placeholder="频道内容标题" value={post.title || ''} onChange={e => setDraft({ ...draft, channelPost: { ...post, title: e.target.value } })} /><input className="form-input" placeholder="作者名，默认管理员" value={post.author_name || ''} onChange={e => setDraft({ ...draft, channelPost: { ...post, author_name: e.target.value } })} /><textarea className="form-textarea channel-desc" placeholder="频道内容正文" value={post.content || ''} onChange={e => setDraft({ ...draft, channelPost: { ...post, content: e.target.value } })} /><button className="btn btn-primary" onClick={publish} disabled={!post.channel_id || !post.title?.trim() || !post.content?.trim()}>发布频道内容</button></div>{channels.length ? channels.map(c => <div className="admin-row" key={c.id}><div><b>{c.name}</b><p>{c.slug} · {c.mode === 'api' ? '接口对接' : '手动发布'} · {c.enabled ? '启用' : '停用'} · 内容 {c.post_count || 0}</p><small>{c.description || '无说明'}</small></div><div className="admin-actions"><a className="btn btn-sm btn-secondary" href={`/channels/${c.slug}`}>查看</a>{c.mode === 'api' && <button className="btn btn-sm btn-secondary" onClick={() => run(() => api(`/api/admin/channels/${c.id}/test-source`, { method:'POST' }))}>测试接口</button>}{c.mode === 'api' && <button className="btn btn-sm btn-secondary" onClick={() => run(() => api(`/api/admin/channels/${c.id}/sync`, { method:'POST' }))}>立即同步</button>}<button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除频道及内容？') && run(() => api(`/api/admin/channels/${c.id}`, { method:'DELETE' }))}>删除</button></div></div>) : <div className="empty-state"><i className="fas fa-satellite-dish" /><p>暂无频道，先创建一个</p></div>}{posts.length > 0 && <><h3>频道内容</h3>{posts.map(p => <div className="admin-row" key={p.id}><div><b>{p.title}</b><p>{p.channel_name} · {p.author_name} · 评论 {p.comments || 0}</p></div><div className="admin-actions"><a className="btn btn-sm btn-secondary" href={`/channel-post/${p.id}`}>查看</a><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除这条频道内容？') && run(() => api(`/api/admin/channel_posts/${p.id}`, { method:'DELETE' }))}>删除</button></div></div>)}</>}</div>
+  return <div className="admin-card"><h3>频道管理</h3>
+    <div className="admin-create channel-create">
+      <input className="form-input" placeholder="频道名，如 linux.do" value={ch.name || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, name: e.target.value, slug: ch.slug || e.target.value.toLowerCase().replace(/\s+/g,'-') } })} />
+      <input className="form-input" placeholder="slug，如 linux-do" value={ch.slug || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, slug: e.target.value } })} />
+      <select className="form-select" value={ch.mode || 'manual'} onChange={e => setDraft({ ...draft, channel: { ...ch, mode: e.target.value } })}><option value="manual">手动发帖</option><option value="api">接口对接</option></select>
+      <label className="channel-enabled"><input type="checkbox" checked={ch.enabled !== false} onChange={e => setDraft({ ...draft, channel: { ...ch, enabled: e.target.checked } })} /> 启用</label>
+      <textarea className="form-textarea channel-desc" placeholder="频道说明" value={ch.description || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, description: e.target.value } })} />
+      {ch.mode === 'api' && <><input className="form-input channel-full" placeholder="接口地址" value={ch.endpoint_url || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, endpoint_url: e.target.value } })} /><input className="form-input" placeholder="凭据引用名（不填明文密钥）" value={ch.auth_secret_ref || ''} onChange={e => setDraft({ ...draft, channel: { ...ch, auth_secret_ref: e.target.value } })} /></>}
+      <div className="admin-actions channel-full"><button className="btn btn-primary" onClick={saveChannel} disabled={!ch.name?.trim() || !ch.slug?.trim()}>{editing ? '保存频道' : '创建频道'}</button>{editing && <button className="btn btn-secondary" onClick={resetChannel}>取消编辑</button>}</div>
+    </div>
+    <div className="admin-create channel-post-create"><select className="form-select" value={post.channel_id || ''} onChange={e => setDraft({ ...draft, channelPost: { ...post, channel_id: e.target.value } })}>{channels.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select><input className="form-input" placeholder="频道内容标题" value={post.title || ''} onChange={e => setDraft({ ...draft, channelPost: { ...post, title: e.target.value } })} /><input className="form-input" placeholder="作者名，默认管理员" value={post.author_name || ''} onChange={e => setDraft({ ...draft, channelPost: { ...post, author_name: e.target.value } })} /><textarea className="form-textarea channel-desc" placeholder="频道内容正文" value={post.content || ''} onChange={e => setDraft({ ...draft, channelPost: { ...post, content: e.target.value } })} /><button className="btn btn-primary" onClick={publish} disabled={!post.channel_id || !post.title?.trim() || !post.content?.trim()}>发布频道内容</button></div>
+    {channels.length ? channels.map(c => <div className="admin-row" key={c.id}><div><b>{c.name}</b><p>{c.slug} · {c.mode === 'api' ? '接口对接' : '手动发布'} · {c.enabled ? '启用' : '停用'} · 内容 {c.post_count || 0}</p><small>{c.description || '无说明'}</small></div><div className="admin-actions"><button className="btn btn-sm btn-secondary" onClick={() => editChannel(c)}>编辑</button><a className="btn btn-sm btn-secondary" href={`/channels/${c.slug}`}>查看</a>{c.mode === 'api' && <button className="btn btn-sm btn-secondary" onClick={() => run(() => api(`/api/admin/channels/${c.id}/test-source`, { method:'POST' }))}>测试接口</button>}{c.mode === 'api' && <button className="btn btn-sm btn-secondary" onClick={() => run(() => api(`/api/admin/channels/${c.id}/sync`, { method:'POST' }))}>立即同步</button>}<button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除频道及内容？') && run(() => api(`/api/admin/channels/${c.id}`, { method:'DELETE' }))}>删除</button></div></div>) : <div className="empty-state"><i className="fas fa-satellite-dish" /><p>暂无频道，先创建一个</p></div>}
+    {posts.length > 0 && <><h3>频道内容</h3>{posts.map(p => <div className="admin-row" key={p.id}><div><b>{p.title}</b><p>{p.channel_name} · {p.author_name} · {p.time} · 评论 {p.comments || 0}</p></div><div className="admin-actions"><a className="btn btn-sm btn-secondary" href={`/channel-post/${p.id}`}>查看</a><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除这条频道内容？') && run(() => api(`/api/admin/channel_posts/${p.id}`, { method:'DELETE' }))}>删除</button></div></div>)}</>}
+  </div>
 }
+
 
 function notify(message, type = 'info') {
   window.dispatchEvent(new CustomEvent('app:toast', { detail: { message, type } }))
@@ -473,29 +1209,43 @@ function PostListSkeleton({ count = 6 }) { return <>{Array.from({ length: count 
 function HomeSkeleton() { return <><PageChrome /><div className="main-content"><div className="skeleton-search skeleton-shimmer" /><div className="home-layout"><div className="card"><div className="card-header"><h3><i className="fas fa-circle-notch fa-spin" /> 正在加载内容</h3></div><PostListSkeleton /></div><div className="card sidebar-card"><div className="card-header"><h3>侧栏</h3></div><div className="card-body"><span className="skeleton-line w95" /><span className="skeleton-line w70" /></div></div></div></div></> }
 function DetailSkeleton() { return <><PageChrome /><div className="main-content"><div className="detail-wrap"><div className="card"><div className="card-body"><span className="skeleton-line w70 big" /><span className="skeleton-line w45" /><span className="skeleton-line w95" /><span className="skeleton-line w95" /><span className="skeleton-line w70" /></div></div></div></div></> }
 
+function TopicDotLoader() { return <><PageChrome /><div className="main-content"><div className="topic-transition-loader" aria-label="帖子加载中"><div className="topic-loader-dots"><span /><span /><span /></div></div></div></> }
+
 function Loading() { return <div className="page-loading"><div className="loading-card"><span className="loading-dot" /> 正在加载...</div></div> }
 
 function App() {
   const path = useRoute()
   const [me, setMe] = useState(null)
-  useEffect(() => { api('/api/me').then(r => setMe(r.user)).catch(() => {}) }, [])
+  const [site, setSite] = useState(defaultSite)
+  useEffect(() => { api('/api/me').then(r => { setMe(r.user); if (r.user) localStorage.setItem('yhdet_user', JSON.stringify(r.user)) }).catch(() => {}) }, [])
+  useEffect(() => {
+    const onExpired = e => { setMe(null); notify(e.detail || '登录状态已失效', 'error'); navigate('/login') }
+    window.addEventListener('app:session-expired', onExpired)
+    return () => window.removeEventListener('app:session-expired', onExpired)
+  }, [])
+  useEffect(() => { getChrome().then(d => { if (d.settings) setSite({ ...defaultSite, ...d.settings, stats: d.stats, runtime: d.runtime }) }).catch(() => {}) }, [])
   const page = useMemo(() => {
     const pathname = new URL(path, location.origin).pathname
-    if (pathname === '/login') return <AuthPage mode="login" setMe={setMe} />
-    if (pathname === '/register') return <AuthPage mode="register" setMe={setMe} />
+    if (pathname === '/login') return <AuthPage mode="login" setMe={setMe} site={site} />
+    if (pathname === '/register') return <AuthPage mode="register" setMe={setMe} site={site} />
     if (pathname === '/new') return <NewPost me={me} />
     if (pathname === '/channels') return <ChannelsPage />
     if (pathname.startsWith('/channels/')) return <ChannelDetail slug={pathname.split('/')[2]} />
     if (pathname.startsWith('/channel-post/')) return <ChannelPostDetail id={pathname.split('/')[2]} me={me} />
     if (pathname === '/admin') return <AdminPage me={me} />
     if (pathname.startsWith('/post/')) return <PostDetail id={pathname.split('/')[2]} me={me} />
-    if (pathname.startsWith('/user/')) return <UserPage id={pathname.split('/')[2]} />
+    if (pathname.startsWith('/user/')) return <UserPage id={pathname.split('/')[2]} me={me} setMe={setMe} />
     if (pathname === '/games') return <SimpleSection type="games" />
     if (pathname === '/music') return <SimpleSection type="music" />
     return <Home />
   }, [path, me])
   const isAuth = new URL(path, location.origin).pathname === '/login' || new URL(path, location.origin).pathname === '/register'
-  return <>{isAuth ? page : <><Nav me={me} setMe={setMe} path={path} />{page}<footer className="footer"><p>易聊社区</p></footer></>}<ToastHost /></>
+  return <>{isAuth ? page : <><Nav me={me} setMe={setMe} path={path} site={site} />{page}<SiteFooter site={site} /></>}<ToastHost /></>
 }
 
 createRoot(document.getElementById('root')).render(<App />)
+
+
+
+
+
