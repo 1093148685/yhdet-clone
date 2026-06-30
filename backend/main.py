@@ -13,13 +13,16 @@ import time
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from pathlib import Path
+from enum import Enum
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from PIL import Image, ImageOps, UnidentifiedImageError
+import io
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -96,13 +99,88 @@ SEED_USERS = [
 
 
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
 def now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+class ProductCategory(str, Enum):
+    MEMBER_BENEFIT = "MEMBER_BENEFIT"
+    THEME_DRESSUP = "THEME_DRESSUP"
+    RARE_PERK = "RARE_PERK"
+    GIFT_GENERAL = "GIFT_GENERAL"
+    COUPON_TICKET = "COUPON_TICKET"
+    GAME_ITEM = "GAME_ITEM"
+    COFFEE_SPONSOR = "COFFEE_SPONSOR"
+    PERIPHERAL_PHYSICAL = "PERIPHERAL_PHYSICAL"
+
+
+class FulfillmentMethod(str, Enum):
+    DIRECT_EFFECT = "DIRECT_EFFECT"
+    CARD_KEY = "CARD_KEY"
+    MANUAL_PROCESS = "MANUAL_PROCESS"
+
+
+class OrderStatus(str, Enum):
+    PENDING = "PENDING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+
+DIRECT_EFFECT_CATEGORIES = {ProductCategory.MEMBER_BENEFIT.value, ProductCategory.THEME_DRESSUP.value, ProductCategory.RARE_PERK.value}
+CARD_KEY_CATEGORIES = {ProductCategory.GIFT_GENERAL.value, ProductCategory.COUPON_TICKET.value, ProductCategory.GAME_ITEM.value}
+MANUAL_PROCESS_CATEGORIES = {ProductCategory.COFFEE_SPONSOR.value, ProductCategory.PERIPHERAL_PHYSICAL.value}
+ALL_PRODUCT_CATEGORIES = DIRECT_EFFECT_CATEGORIES | CARD_KEY_CATEGORIES | MANUAL_PROCESS_CATEGORIES
+CATEGORY_METHOD = {**{c: FulfillmentMethod.DIRECT_EFFECT.value for c in DIRECT_EFFECT_CATEGORIES}, **{c: FulfillmentMethod.CARD_KEY.value for c in CARD_KEY_CATEGORIES}, **{c: FulfillmentMethod.MANUAL_PROCESS.value for c in MANUAL_PROCESS_CATEGORIES}}
+LEGACY_CATEGORY_MAP = {
+    "virtual": ProductCategory.GIFT_GENERAL.value,
+    "profile": ProductCategory.MEMBER_BENEFIT.value,
+    "content": ProductCategory.RARE_PERK.value,
+}
+
+
+def normalize_market_category(category: str | None) -> str:
+    raw = (category or "").strip()
+    category = LEGACY_CATEGORY_MAP.get(raw, raw or ProductCategory.GIFT_GENERAL.value)
+    if category not in ALL_PRODUCT_CATEGORIES:
+        raise HTTPException(status_code=400, detail="商品分类不合法")
+    return category
+
+
+def fulfillment_method(category: str | None) -> str:
+    return CATEGORY_METHOD[normalize_market_category(category)]
+
+
+def market_item_fulfillment_method(item: sqlite3.Row | dict[str, Any]) -> str:
+    category = normalize_market_category(item["category"] if isinstance(item, dict) else item["category"])
+    title = (item.get("title") if isinstance(item, dict) else item["title"] if "title" in item.keys() else "") or ""
+    if category == ProductCategory.MEMBER_BENEFIT.value and title in {"改名卡", "头衔申请券"}:
+        return FulfillmentMethod.MANUAL_PROCESS.value
+    return fulfillment_method(category)
+
+
+def market_order_to_dict(o: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": o["id"],
+        "item_id": o["item_id"],
+        "title": o["title"] if "title" in o.keys() else o["item_title"],
+        "item_title": o["title"] if "title" in o.keys() else o["item_title"],
+        "price": o["price"],
+        "cost_points": o["cost_points"],
+        "status": o["status"],
+        "category": o["category"],
+        "shipping_info": o["shipping_info"],
+        "delivered_content": o["delivered_content"],
+        "created_at": o["created_at"],
+        "fulfilled_at": o["fulfilled_at"],
+        "cover_icon": o["cover_icon"] if "cover_icon" in o.keys() else "fa-gift",
+    }
 
 
 def human_duration(seconds: int) -> str:
@@ -351,6 +429,73 @@ def init_db() -> None:
                 banned_by INTEGER,
                 data_json TEXT DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS market_items(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                price INTEGER NOT NULL DEFAULT 0,
+                stock INTEGER NOT NULL DEFAULT -1,
+                category TEXT DEFAULT 'virtual',
+                cover_icon TEXT DEFAULT 'fa-gift',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS point_ledger(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                delta INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                ref_type TEXT DEFAULT '',
+                ref_id INTEGER,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, reason, ref_type, ref_id),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS market_orders(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                item_id INTEGER NOT NULL,
+                price INTEGER NOT NULL,
+                category TEXT NOT NULL DEFAULT 'GIFT_GENERAL',
+                cost_points INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'SUCCESS',
+                shipping_info TEXT NOT NULL DEFAULT '',
+                delivered_content TEXT NOT NULL DEFAULT '',
+                fulfilled_at TEXT DEFAULT '',
+                fulfilled_by INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(item_id) REFERENCES market_items(id),
+                FOREIGN KEY(fulfilled_by) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS user_points(
+                user_id INTEGER PRIMARY KEY,
+                available_points INTEGER NOT NULL DEFAULT 0,
+                total_earned INTEGER NOT NULL DEFAULT 0,
+                current_streak INTEGER NOT NULL DEFAULT 0,
+                last_checkin_date TEXT DEFAULT '',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS product_card_keys(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                key_content TEXT NOT NULL,
+                is_used INTEGER NOT NULL DEFAULT 0,
+                order_id INTEGER,
+                used_at TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(product_id, key_content),
+                FOREIGN KEY(product_id) REFERENCES market_items(id),
+                FOREIGN KEY(order_id) REFERENCES market_orders(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_items_category_active ON market_items(category, enabled, id);
+            CREATE INDEX IF NOT EXISTS idx_market_orders_user_created ON market_orders(user_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_market_orders_status_created ON market_orders(status, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_card_keys_product_used ON product_card_keys(product_id, is_used, id);
+            CREATE INDEX IF NOT EXISTS idx_point_ledger_user_created ON point_ledger(user_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_user_points_available ON user_points(available_points);
             CREATE INDEX IF NOT EXISTS idx_posts_pinned_created_id ON posts(pinned DESC, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_posts_user_created ON posts(user_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_posts_title ON posts(title);
@@ -382,14 +527,71 @@ def init_db() -> None:
             "ALTER TABLE users ADD COLUMN register_ip TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN last_login_ip TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN deleted_at TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN vip_until TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN unlocked_themes TEXT DEFAULT '[]'",
+            "ALTER TABLE users ADD COLUMN rare_perks TEXT DEFAULT '[]'",
         ):
             try:
                 conn.execute(ddl)
             except sqlite3.OperationalError:
                 pass
+        for ddl in (
+            "ALTER TABLE market_orders ADD COLUMN category TEXT NOT NULL DEFAULT 'GIFT_GENERAL'",
+            "ALTER TABLE market_orders ADD COLUMN cost_points INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE market_orders ADD COLUMN shipping_info TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE market_orders ADD COLUMN delivered_content TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE market_orders ADD COLUMN fulfilled_at TEXT DEFAULT ''",
+            "ALTER TABLE market_orders ADD COLUMN fulfilled_by INTEGER",
+            "ALTER TABLE market_items ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
+        conn.execute("UPDATE market_items SET category=CASE category WHEN 'virtual' THEN 'GIFT_GENERAL' WHEN 'profile' THEN 'MEMBER_BENEFIT' WHEN 'content' THEN 'RARE_PERK' ELSE category END WHERE category IN ('virtual','profile','content')")
+        conn.execute("UPDATE market_orders SET status='SUCCESS' WHERE status='completed'")
+        conn.execute("UPDATE market_orders SET cost_points=price WHERE COALESCE(cost_points,0)=0")
+        conn.execute("UPDATE market_orders SET category=(SELECT COALESCE(mi.category,'GIFT_GENERAL') FROM market_items mi WHERE mi.id=market_orders.item_id) WHERE COALESCE(category,'')='' OR category='GIFT_GENERAL'")
+        conn.execute("""
+            INSERT OR IGNORE INTO user_points(user_id, available_points, total_earned, current_streak, last_checkin_date, updated_at)
+            SELECT u.id,
+                   COALESCE((SELECT SUM(delta) FROM point_ledger l WHERE l.user_id=u.id),0),
+                   COALESCE((SELECT SUM(delta) FROM point_ledger l WHERE l.user_id=u.id AND delta>0),0),
+                   0,
+                   '',
+                   ?
+            FROM users u WHERE COALESCE(u.deleted_at,'')=''
+        """, (now(),))
+        conn.execute("""
+            UPDATE user_points
+            SET available_points=COALESCE((SELECT SUM(delta) FROM point_ledger l WHERE l.user_id=user_points.user_id),0),
+                total_earned=COALESCE((SELECT SUM(delta) FROM point_ledger l WHERE l.user_id=user_points.user_id AND delta>0),0),
+                updated_at=?
+        """, (now(),))
+        conn.execute("UPDATE point_ledger SET reason='post_reward' WHERE reason='发布帖子'")
+        conn.execute("UPDATE point_ledger SET reason='comment_reward' WHERE reason='发表评论'")
+        conn.execute("UPDATE point_ledger SET reason='purchase_item' WHERE reason LIKE '兑换：%'")
+        conn.execute("UPDATE point_ledger SET reason='purchase_item' WHERE reason='兑换商品'")
+        conn.execute("UPDATE market_items SET category=? WHERE category NOT IN (?,?,?,?,?,?,?,?)", (ProductCategory.GIFT_GENERAL.value, *sorted(ALL_PRODUCT_CATEGORIES)))
         conn.execute("UPDATE users SET avatar=? WHERE avatar LIKE 'https://yhdet.top/static/avatars/%'", (DEFAULT_AVATAR,))
         conn.execute("INSERT OR IGNORE INTO site_settings(key,value) VALUES('default_avatar', ?)", (DEFAULT_AVATAR,))
         conn.execute("UPDATE site_settings SET value=? WHERE key='default_avatar' AND value LIKE 'https://yhdet.top/static/avatars/%'", (DEFAULT_AVATAR,))
+        market_seed = [
+            ("改名卡", "兑换后提交想修改的新昵称，管理员审核后处理。", 188, 20, ProductCategory.MEMBER_BENEFIT.value, "fa-id-card", '{"request_type":"rename"}'),
+            ("头衔申请券", "提交你想展示的个人头衔，管理员审核后处理。", 288, 10, ProductCategory.MEMBER_BENEFIT.value, "fa-crown", '{"request_type":"custom_title"}'),
+            ("红色用户名", "稀有权益：用户名显示为红色，覆盖个人信息面板、帖子列表和评论区。", 520, 30, ProductCategory.RARE_PERK.value, "fa-gem", '{"perk":"red_username"}'),
+        ]
+        for title, desc, price, stock, category, icon, payload_json in market_seed:
+            conn.execute(
+                """
+                INSERT INTO market_items(title,description,price,stock,category,cover_icon,enabled,payload_json,created_at,updated_at)
+                SELECT ?,?,?,?,?,?,?,?,?,?
+                WHERE NOT EXISTS (SELECT 1 FROM market_items WHERE title=? AND category=?)
+                """,
+                (title, desc, price, stock, category, icon, 1, payload_json, now(), now(), title, category),
+            )
+        conn.execute("UPDATE market_items SET description=?, payload_json=?, category=?, cover_icon=?, price=CASE WHEN COALESCE(price,0)<=0 THEN 188 ELSE price END, updated_at=? WHERE title='改名卡'", ("兑换后提交想修改的新昵称，管理员审核后处理。", '{"request_type":"rename"}', ProductCategory.MEMBER_BENEFIT.value, 'fa-id-card', now()))
+        conn.execute("UPDATE market_items SET description=?, payload_json=?, category=?, cover_icon=?, price=CASE WHEN COALESCE(price,0)<=0 THEN 288 ELSE price END, stock=CASE WHEN COALESCE(stock,0)=0 THEN 10 ELSE stock END, updated_at=? WHERE title='头衔申请券'", ("提交你想展示的个人头衔，管理员审核后处理。", '{"request_type":"custom_title"}', ProductCategory.MEMBER_BENEFIT.value, 'fa-crown', now()))
         if conn.execute("SELECT COUNT(*) FROM users WHERE COALESCE(deleted_at,'')='' ").fetchone()[0] == 0:
             for uid, username, role, role_label, custom_title, avatar in SEED_USERS:
                 conn.execute(
@@ -460,6 +662,20 @@ def send_account_notice(conn: sqlite3.Connection, user: sqlite3.Row, subject: st
         pass
 
 
+def user_has_perk(row: sqlite3.Row | None, perk: str) -> bool:
+    if not row or "rare_perks" not in row.keys():
+        return False
+    try:
+        perks = json.loads(row["rare_perks"] or "[]")
+    except Exception:
+        perks = []
+    return perk in perks
+
+
+def user_display_flags(row: sqlite3.Row | None) -> dict[str, Any]:
+    return {"red_username": user_has_perk(row, "red_username")}
+
+
 def post_row_to_dict(r: sqlite3.Row, default_avatar: str = DEFAULT_AVATAR) -> dict[str, Any]:
     return {
         "id": r["id"],
@@ -475,6 +691,7 @@ def post_row_to_dict(r: sqlite3.Row, default_avatar: str = DEFAULT_AVATAR) -> di
         "role": r["role_label"] or ("超管" if r["role"] == "admin" else ""),
         "custom_title": r["custom_title"] or ("论坛主" if r["role"] == "admin" else ""),
         "pinned": bool(r["pinned"]),
+        "display_flags": user_display_flags(r),
     }
 
 
@@ -505,6 +722,7 @@ def comment_row_to_dict(c: sqlite3.Row, viewer: sqlite3.Row | None = None) -> di
         "reply_to_deleted": reply_deleted,
         "can_edit": can_manage,
         "can_delete": can_manage,
+        "display_flags": user_display_flags(c),
     }
 
 
@@ -788,6 +1006,34 @@ class ChannelPostIn(BaseModel):
     external_url: str | None = Field(default='', max_length=500)
 
 
+class MarketBuyIn(BaseModel):
+    item_id: int
+    shipping_name: str | None = Field(default='', max_length=80)
+    shipping_phone: str | None = Field(default='', max_length=40)
+    shipping_address: str | None = Field(default='', max_length=500)
+    request_note: str | None = Field(default='', max_length=500)
+
+
+class MarketItemIn(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field(default='', max_length=1000)
+    price: int = Field(ge=0, le=1000000)
+    stock: int = Field(default=-1, ge=-1, le=1000000)
+    category: ProductCategory = ProductCategory.GIFT_GENERAL
+    cover_icon: str = Field(default='fa-gift', max_length=80)
+    enabled: bool = True
+    payload_json: str = Field(default='{}', max_length=4000)
+
+
+class MarketKeysIn(BaseModel):
+    product_id: int
+    keys_text: str = Field(min_length=1, max_length=200000)
+
+
+class MarketFulfillIn(BaseModel):
+    delivered_content: str = Field(min_length=1, max_length=1000)
+
+
 @app.on_event("startup")
 def startup() -> None:
     init_db()
@@ -925,7 +1171,7 @@ def home():
         conn.execute("UPDATE site_stats SET value=value+1 WHERE key='visits'")
         rows = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id
             ORDER BY p.created_at DESC
@@ -1042,19 +1288,44 @@ def mark_one_notification_read(notification_id: int, authorization: str | None =
 
 
 @app.post("/api/me/avatar")
-async def upload_my_avatar(file: UploadFile = File(...), authorization: str | None = Header(default=None)):
+async def upload_my_avatar(
+    file: UploadFile = File(...),
+    x: int = Form(0),
+    y: int = Form(0),
+    width: int = Form(0),
+    height: int = Form(0),
+    authorization: str | None = Header(default=None),
+):
     user = require_user(current_user(authorization))
-    ext = Path(file.filename or '').suffix.lower()
-    if ext not in {'.png', '.jpg', '.jpeg', '.webp', '.gif'}:
-        ext = '.png'
-    content = await file.read(3 * 1024 * 1024 + 1)
-    if len(content) > 3 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="头像不能超过 3MB")
+    content = await file.read(8 * 1024 * 1024 + 1)
+    if len(content) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="头像不能超过 8MB")
     if not content:
         raise HTTPException(status_code=400, detail="请选择头像文件")
-    name = f"avatar_{user['id']}_{secrets.token_hex(8)}{ext}"
+    try:
+        src = Image.open(io.BytesIO(content))
+        src = ImageOps.exif_transpose(src).convert("RGBA")
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=400, detail="图片文件无法识别")
+
+    natural_w, natural_h = src.size
+    if width <= 0 or height <= 0:
+        side = min(natural_w, natural_h)
+        x = (natural_w - side) // 2
+        y = (natural_h - side) // 2
+        width = height = side
+    x = max(0, min(int(x), natural_w - 1))
+    y = max(0, min(int(y), natural_h - 1))
+    width = max(1, min(int(width), natural_w - x))
+    height = max(1, min(int(height), natural_h - y))
+    box = (x, y, x + width, y + height)
+    avatar = src.crop(box).resize((512, 512), Image.Resampling.LANCZOS)
+
+    name = f"avatar_{user['id']}_{secrets.token_hex(8)}.png"
     path = UPLOAD_DIR / name
-    path.write_bytes(content)
+    out = io.BytesIO()
+    avatar.save(out, format="PNG", optimize=True)
+    path.write_bytes(out.getvalue())
     url = f"/uploads/{name}"
     with db() as conn:
         conn.execute("UPDATE users SET avatar=? WHERE id=?", (url, user["id"]))
@@ -1076,6 +1347,7 @@ def public_user(user: sqlite3.Row | None, default_avatar: str = DEFAULT_AVATAR) 
         "created_at": user["created_at"],
         "account_status": user["account_status"] if "account_status" in user.keys() else "active",
         "frozen_until": user["frozen_until"] if "frozen_until" in user.keys() else "",
+        "display_flags": user_display_flags(user),
     }
 
 
@@ -1095,7 +1367,7 @@ def list_posts(q: str = "", page: int = 1, page_size: int = 30, limit: int | Non
     with db() as conn:
         rows = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id
             WHERE ?='' OR p.title LIKE ? OR p.content LIKE ? OR u.username LIKE ?
@@ -1130,6 +1402,7 @@ def create_post(payload: PostIn, authorization: str | None = Header(default=None
             "INSERT INTO posts(user_id,title,content,views,pinned,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
             (user["id"], payload.title.strip(), payload.content.strip(), 0, 0, now(), now()),
         )
+        award_points(conn, user["id"], 12, "发布帖子", "post", cur.lastrowid)
     return {"id": cur.lastrowid}
 
 
@@ -1140,7 +1413,7 @@ def get_post(post_id: int, authorization: str | None = Header(default=None)):
         conn.execute("UPDATE posts SET views=views+1 WHERE id=?", (post_id,))
         row = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND (COALESCE(c.deleted_at,'')='' OR EXISTS (SELECT 1 FROM comments child WHERE child.reply_to_comment_id=c.id AND child.post_id=c.post_id))) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?
             """,
@@ -1150,7 +1423,7 @@ def get_post(post_id: int, authorization: str | None = Header(default=None)):
             raise HTTPException(status_code=404, detail="帖子不存在")
         comments = conn.execute(
             """
-            SELECT c.*, u.username, u.avatar, u.role, u.role_label,
+            SELECT c.*, u.username, u.avatar, u.role, u.role_label, u.rare_perks,
                    ru.id AS reply_user_id, ru.username AS reply_author, ru.avatar AS reply_avatar,
                    rc.content AS reply_content, rc.deleted_at AS reply_deleted_at
             FROM comments c
@@ -1204,6 +1477,7 @@ async def add_comment(post_id: int, payload: CommentIn, authorization: str | Non
             if not reply_exists:
                 raise HTTPException(status_code=400, detail="回复的评论不存在")
         cur = conn.execute("INSERT INTO comments(post_id,user_id,content,reply_to_comment_id,created_at) VALUES(?,?,?,?,?)", (post_id, user["id"], payload.content.strip(), reply_to_comment_id, now()))
+        award_points(conn, user["id"], 3, "发表评论", "comment", cur.lastrowid)
         _record_comment_notification(conn, exists, user, cur.lastrowid, payload.content.strip())
     await presence_manager.broadcast(post_id, {"type": "comment_created", "post_id": post_id, "comment_id": cur.lastrowid})
     return {"id": cur.lastrowid}
@@ -1268,18 +1542,19 @@ def users(q: str = "", page: int = 1, page_size: int = 30, limit: int | None = N
 
 
 @app.get("/api/users/{user_id}")
-def user_detail(user_id: int, posts_page: int = 1, comments_page: int = 1, sent_comments_page: int = 1, page_size: int = 10, authorization: str | None = Header(default=None)):
+def user_detail(user_id: int, posts_page: int = 1, comments_page: int = 1, sent_comments_page: int = 1, orders_page: int = 1, page_size: int = 10, authorization: str | None = Header(default=None)):
     page_size = max(1, min(int(page_size or 10), 30))
     posts_page = max(1, int(posts_page or 1))
     comments_page = max(1, int(comments_page or 1))
     sent_comments_page = max(1, int(sent_comments_page or 1))
+    orders_page = max(1, int(orders_page or 1))
     with db() as conn:
         user = conn.execute("SELECT * FROM users WHERE id=? AND COALESCE(deleted_at,'')=''", (user_id,)).fetchone()
         if not user:
             raise HTTPException(status_code=404, detail="用户不存在")
         rows = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id WHERE p.user_id=? ORDER BY p.created_at DESC LIMIT ? OFFSET ?
             """,
@@ -1300,6 +1575,10 @@ def user_detail(user_id: int, posts_page: int = 1, comments_page: int = 1, sent_
             "max_post_comments": int(max_comments or 0),
             "last_active_at": (last_active_row["last_active"] if last_active_row else "") or "",
         }
+        point_balance = conn.execute("SELECT COALESCE(SUM(delta),0) FROM point_ledger WHERE user_id=?", (user_id,)).fetchone()[0]
+        order_count = conn.execute("SELECT COUNT(*) FROM market_orders WHERE user_id=?", (user_id,)).fetchone()[0]
+        profile_stats["hongcoin_balance"] = int(point_balance or 0)
+        profile_stats["market_orders_count"] = int(order_count or 0)
         viewer = current_user(authorization)
         is_owner = bool(viewer and viewer["id"] == user_id)
         if is_owner:
@@ -1330,12 +1609,23 @@ def user_detail(user_id: int, posts_page: int = 1, comments_page: int = 1, sent_
             ).fetchall()
             sent_comment_total = sent_comment_total_all
             unread_notifications = conn.execute("SELECT COUNT(*) FROM comment_notifications WHERE user_id=? AND COALESCE(read_at,'')=''", (user_id,)).fetchone()[0]
+            order_rows = conn.execute(
+                """
+                SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
+                LEFT JOIN market_items mi ON mi.id=o.item_id
+                WHERE o.user_id=? ORDER BY o.id DESC LIMIT ? OFFSET ?
+                """,
+                (user_id, 5, (orders_page-1)*5),
+            ).fetchall()
+            order_total = conn.execute("SELECT COUNT(*) FROM market_orders WHERE user_id=?", (user_id,)).fetchone()[0]
         else:
             comment_rows = []
             sent_comment_rows = []
             comment_total = 0
             sent_comment_total = 0
             unread_notifications = 0
+            order_rows = []
+            order_total = 0
     return {
         "user": public_user(user),
         "profile_stats": profile_stats,
@@ -1344,12 +1634,381 @@ def user_detail(user_id: int, posts_page: int = 1, comments_page: int = 1, sent_
         "posts_has_more": posts_page * page_size < post_total,
         "received_comments": [{"id": c["id"], "notification_id": c["notification_id"], "read": bool(c["notification_read_at"]) if c["notification_id"] else True, "post_id": c["post_id"], "post_title": c["post_title"], "user_id": c["user_id"], "author": c["actor_name"], "avatar": c["actor_avatar"] or DEFAULT_AVATAR, "content": c["content"], "time": c["created_at"]} for c in comment_rows],
         "sent_comments": [{"id": c["id"], "post_id": c["post_id"], "post_title": c["post_title"], "owner_name": c["owner_name"], "owner_avatar": c["owner_avatar"] or DEFAULT_AVATAR, "content": c["content"], "time": c["created_at"]} for c in sent_comment_rows],
+        "market_orders": [market_order_to_dict(o) for o in order_rows],
+        "market_orders_total": order_total,
+        "market_orders_has_more": orders_page * 5 < order_total,
         "unread_notifications": unread_notifications,
         "received_comments_total": comment_total,
         "received_comments_has_more": comments_page * page_size < comment_total,
         "sent_comments_total": sent_comment_total,
         "sent_comments_has_more": sent_comments_page * page_size < sent_comment_total,
     }
+
+
+def refresh_user_points(conn: sqlite3.Connection, user_id: int) -> int:
+    conn.execute("INSERT OR IGNORE INTO user_points(user_id, available_points, total_earned, current_streak, last_checkin_date, updated_at) VALUES(?,?,?,?,?,?)", (user_id, 0, 0, 0, '', now()))
+    balance = conn.execute("SELECT COALESCE(SUM(delta),0) FROM point_ledger WHERE user_id=?", (user_id,)).fetchone()[0]
+    earned = conn.execute("SELECT COALESCE(SUM(delta),0) FROM point_ledger WHERE user_id=? AND delta>0", (user_id,)).fetchone()[0]
+    conn.execute("UPDATE user_points SET available_points=?, total_earned=?, updated_at=? WHERE user_id=?", (int(balance or 0), int(earned or 0), now(), user_id))
+    return int(balance or 0)
+
+
+def award_points(conn: sqlite3.Connection, user_id: int, delta: int, reason: str, ref_type: str, ref_id: int, daily_cap: int = 80) -> int:
+    """Idempotently award positive points and keep user_points snapshot in sync."""
+    if delta <= 0:
+        raise ValueError("award_points delta must be positive")
+    refresh_user_points(conn, user_id)
+    existing = conn.execute("SELECT id FROM point_ledger WHERE user_id=? AND ref_type=? AND ref_id=?", (user_id, ref_type, ref_id)).fetchone()
+    if existing:
+        return refresh_user_points(conn, user_id)
+    today = datetime.now().strftime("%Y-%m-%d")
+    if daily_cap > 0:
+        earned_today = conn.execute("SELECT COALESCE(SUM(delta),0) FROM point_ledger WHERE user_id=? AND delta>0 AND ref_type IN ('post','comment') AND substr(created_at,1,10)=?", (user_id, today)).fetchone()[0]
+        delta = max(0, min(delta, daily_cap - int(earned_today or 0)))
+    if delta <= 0:
+        return refresh_user_points(conn, user_id)
+    conn.execute("INSERT OR IGNORE INTO point_ledger(user_id,delta,reason,ref_type,ref_id,created_at) VALUES(?,?,?,?,?,?)", (user_id, delta, reason, ref_type, ref_id, now()))
+    return refresh_user_points(conn, user_id)
+
+
+def checkin_points(conn: sqlite3.Connection, user_id: int) -> dict[str, Any]:
+    refresh_user_points(conn, user_id)
+    today = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    row = conn.execute("SELECT * FROM user_points WHERE user_id=?", (user_id,)).fetchone()
+    if row and row["last_checkin_date"] == today:
+        return {"ok": True, "already": True, "earned": 0, "streak": int(row["current_streak"] or 0), "balance": int(row["available_points"] or 0)}
+    streak = (int(row["current_streak"] or 0) + 1) if row and row["last_checkin_date"] == yesterday else 1
+    earned = min(20, 5 + streak)
+    conn.execute("INSERT INTO point_ledger(user_id,delta,reason,ref_type,ref_id,created_at) VALUES(?,?,?,?,?,?)", (user_id, earned, "每日签到", "checkin", int(datetime.now().strftime("%Y%m%d")), now()))
+    balance = refresh_user_points(conn, user_id)
+    conn.execute("UPDATE user_points SET current_streak=?, last_checkin_date=?, updated_at=? WHERE user_id=?", (streak, today, now(), user_id))
+    return {"ok": True, "already": False, "earned": earned, "streak": streak, "balance": balance}
+
+
+def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category: str, item: sqlite3.Row) -> str:
+    payload_raw = item["payload_json"] if "payload_json" in item.keys() else "{}"
+    try:
+        payload = json.loads(payload_raw or "{}")
+    except Exception:
+        payload = {}
+    if category == ProductCategory.MEMBER_BENEFIT.value:
+        days = int(payload.get("vip_days") or 30)
+        current = conn.execute("SELECT vip_until FROM users WHERE id=?", (user_id,)).fetchone()
+        base = datetime.now()
+        if current and (current["vip_until"] or "") > now():
+            try:
+                base = datetime.strptime(current["vip_until"], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                base = datetime.now()
+        until = (base + timedelta(days=max(1, days))).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("UPDATE users SET vip_until=?, role_label=CASE WHEN COALESCE(role_label,'')='' THEN 'VIP会员' ELSE role_label END WHERE id=?", (until, user_id))
+        return f"VIP 已开通至 {until}"
+    if category == ProductCategory.THEME_DRESSUP.value:
+        theme_id = str(payload.get("theme_id") or item["title"]).strip()[:80]
+        row = conn.execute("SELECT unlocked_themes FROM users WHERE id=?", (user_id,)).fetchone()
+        themes = []
+        try:
+            themes = json.loads((row["unlocked_themes"] if row else "[]") or "[]")
+        except Exception:
+            themes = []
+        if theme_id not in themes:
+            themes.append(theme_id)
+        conn.execute("UPDATE users SET unlocked_themes=? WHERE id=?", (json.dumps(themes, ensure_ascii=False), user_id))
+        return f"已解锁主题：{theme_id}"
+    if category == ProductCategory.RARE_PERK.value:
+        perk = str(payload.get("perk") or item["title"]).strip()[:120]
+        perk_key = "red_username" if perk in ("red_username", "红色用户名") or item["title"] == "红色用户名" else perk
+        row = conn.execute("SELECT rare_perks FROM users WHERE id=?", (user_id,)).fetchone()
+        perks = []
+        try:
+            perks = json.loads((row["rare_perks"] if row else "[]") or "[]")
+        except Exception:
+            perks = []
+        if perk_key not in perks:
+            perks.append(perk_key)
+        conn.execute("UPDATE users SET rare_perks=? WHERE id=?", (json.dumps(perks, ensure_ascii=False), user_id))
+        if perk_key == "red_username":
+            return "已解锁权益：红色用户名"
+        return f"已解锁权益：{perk_key}"
+    raise HTTPException(status_code=400, detail="不支持的即时生效商品")
+
+
+def shipping_text(payload: MarketBuyIn) -> str:
+    name = (payload.shipping_name or "").strip()
+    phone = (payload.shipping_phone or "").strip()
+    address = (payload.shipping_address or "").strip()
+    if not (name and phone and address):
+        raise HTTPException(status_code=400, detail="实物商品需要填写收货人、电话和地址")
+    return json.dumps({"name": name, "phone": phone, "address": address}, ensure_ascii=False)
+
+
+@app.post("/api/points/checkin")
+def points_checkin(authorization: str | None = Header(default=None)):
+    user = require_user(current_user(authorization))
+    with db() as conn:
+        return checkin_points(conn, user["id"])
+
+
+@app.get("/api/market")
+def market_home(authorization: str | None = Header(default=None)):
+    user = require_user(current_user(authorization))
+    with db() as conn:
+        balance = refresh_user_points(conn, user["id"])
+        items = conn.execute("SELECT * FROM market_items WHERE enabled=1 ORDER BY price ASC, id ASC").fetchall()
+        orders = conn.execute(
+            """
+            SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
+            JOIN market_items mi ON mi.id=o.item_id
+            WHERE o.user_id=? ORDER BY o.id DESC LIMIT 8
+            """,
+            (user["id"],),
+        ).fetchall()
+    return {
+        "balance": int(balance or 0),
+        "items": [{**dict(i), "fulfillment_method": market_item_fulfillment_method(i)} for i in items],
+        "orders": [market_order_to_dict(o) for o in orders],
+        "rules": ["发布帖子 +12 泓币", "发表评论 +3 泓币", "卡密自动发放，实物/赞助进入待处理"],
+    }
+
+
+@app.get("/api/market/orders")
+def market_orders(page: int = 1, page_size: int = 5, authorization: str | None = Header(default=None)):
+    user = require_user(current_user(authorization))
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 5), 30))
+    offset_value = (page - 1) * page_size
+    with db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM market_orders WHERE user_id=?", (user["id"],)).fetchone()[0]
+        rows = conn.execute(
+            """
+            SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
+            LEFT JOIN market_items mi ON mi.id=o.item_id
+            WHERE o.user_id=? ORDER BY o.id DESC LIMIT ? OFFSET ?
+            """,
+            (user["id"], page_size, offset_value),
+        ).fetchall()
+    return {"items": [market_order_to_dict(o) for o in rows], "total": total, "page": page, "page_size": page_size, "has_more": offset_value + len(rows) < total}
+
+
+@app.post("/api/market/buy")
+@app.post("/api/market/orders")
+def market_buy(payload: MarketBuyIn, authorization: str | None = Header(default=None)):
+    user = require_user(current_user(authorization))
+    order_id = None
+    try:
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                item = conn.execute("SELECT * FROM market_items WHERE id=? AND enabled=1", (payload.item_id,)).fetchone()
+                if not item:
+                    raise HTTPException(status_code=404, detail="商品不存在或已下架")
+                category = normalize_market_category(item["category"])
+                method = market_item_fulfillment_method(item)
+                price = int(item["price"] or 0)
+                if price < 0:
+                    raise HTTPException(status_code=400, detail="商品价格异常")
+                balance = refresh_user_points(conn, user["id"])
+                if balance < price:
+                    raise HTTPException(status_code=400, detail="泓币不足")
+                if int(item["stock"] or 0) == 0:
+                    raise HTTPException(status_code=400, detail="商品已售罄")
+                shipping_info = ""
+                delivered_content = ""
+                status = OrderStatus.SUCCESS.value
+                if method == FulfillmentMethod.MANUAL_PROCESS.value:
+                    status = OrderStatus.PENDING.value
+                    note = (payload.request_note or "").strip()
+                    if category == ProductCategory.PERIPHERAL_PHYSICAL.value:
+                        shipping_info = shipping_text(payload)
+                    elif note:
+                        shipping_info = json.dumps({"note": note}, ensure_ascii=False)
+                    elif item["title"] == "改名卡":
+                        shipping_info = json.dumps({"note": "待提交新昵称"}, ensure_ascii=False)
+                    elif item["title"] == "头衔申请券":
+                        shipping_info = json.dumps({"note": "待提交申请头衔"}, ensure_ascii=False)
+                    else:
+                        shipping_info = json.dumps({"note": "赞助/人工履约，等待管理员处理"}, ensure_ascii=False)
+                stock_cur = conn.execute("UPDATE market_items SET stock=CASE WHEN stock>0 THEN stock-1 ELSE stock END, updated_at=? WHERE id=? AND enabled=1 AND stock<>0", (now(), item["id"]))
+                if stock_cur.rowcount == 0:
+                    raise HTTPException(status_code=400, detail="商品库存不足")
+                cur = conn.execute(
+                    "INSERT INTO market_orders(user_id,item_id,price,category,cost_points,status,shipping_info,delivered_content,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (user["id"], item["id"], price, category, price, status, shipping_info, delivered_content, now()),
+                )
+                order_id = cur.lastrowid
+                if method == FulfillmentMethod.CARD_KEY.value:
+                    key = conn.execute("SELECT * FROM product_card_keys WHERE product_id=? AND is_used=0 ORDER BY id ASC LIMIT 1", (item["id"],)).fetchone()
+                    if not key:
+                        raise HTTPException(status_code=400, detail="卡密库存不足，请联系管理员补货")
+                    used = conn.execute("UPDATE product_card_keys SET is_used=1, order_id=?, used_at=? WHERE id=? AND is_used=0", (order_id, now(), key["id"]))
+                    if used.rowcount == 0:
+                        raise HTTPException(status_code=409, detail="卡密被其他订单占用，请重试")
+                    delivered_content = key["key_content"]
+                    conn.execute("UPDATE market_orders SET delivered_content=? WHERE id=?", (delivered_content, order_id))
+                elif method == FulfillmentMethod.DIRECT_EFFECT.value:
+                    delivered_content = apply_direct_market_effect(conn, user["id"], category, item)
+                    conn.execute("UPDATE market_orders SET delivered_content=? WHERE id=?", (delivered_content, order_id))
+                points_cur = conn.execute("UPDATE user_points SET available_points=available_points-?, updated_at=? WHERE user_id=? AND available_points>=?", (price, now(), user["id"], price))
+                if points_cur.rowcount == 0:
+                    raise HTTPException(status_code=400, detail="泓币不足")
+                conn.execute("INSERT INTO point_ledger(user_id,delta,reason,ref_type,ref_id,created_at) VALUES(?,?,?,?,?,?)", (user["id"], -price, "purchase_item", "market_order", order_id, now()))
+                new_balance = refresh_user_points(conn, user["id"])
+                if new_balance < 0:
+                    raise HTTPException(status_code=500, detail="积分账目异常，已回滚")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            raise HTTPException(status_code=409, detail="系统繁忙，请稍后重试")
+        raise
+    return {"ok": True, "order_id": order_id, "balance": int(new_balance or 0), "status": status, "delivered_content": delivered_content}
+
+
+@app.get("/api/admin/market")
+def admin_market(authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    with db() as conn:
+        items = conn.execute("SELECT * FROM market_items ORDER BY enabled DESC, id DESC").fetchall()
+        orders = conn.execute(
+            """
+            SELECT o.*, u.username, mi.title AS item_title
+            FROM market_orders o
+            JOIN users u ON u.id=o.user_id
+            JOIN market_items mi ON mi.id=o.item_id
+            ORDER BY o.id DESC LIMIT 80
+            """
+        ).fetchall()
+        ledgers = conn.execute(
+            """
+            SELECT l.*, u.username
+            FROM point_ledger l JOIN users u ON u.id=l.user_id
+            ORDER BY l.id DESC LIMIT 80
+            """
+        ).fetchall()
+    return {
+        "items": [{**dict(i), "fulfillment_method": market_item_fulfillment_method(i), "card_key_available": conn.execute("SELECT COUNT(*) FROM product_card_keys WHERE product_id=? AND is_used=0", (i["id"],)).fetchone()[0], "orders_count": conn.execute("SELECT COUNT(*) FROM market_orders WHERE item_id=?", (i["id"],)).fetchone()[0]} for i in items],
+        "orders": [{"id": o["id"], "username": o["username"], "item_title": o["item_title"], "price": o["price"], "cost_points": o["cost_points"], "category": o["category"], "status": o["status"], "shipping_info": o["shipping_info"], "delivered_content": o["delivered_content"], "created_at": o["created_at"], "fulfilled_at": o["fulfilled_at"]} for o in orders],
+        "ledgers": [{"id": l["id"], "username": l["username"], "delta": l["delta"], "reason": l["reason"], "ref_type": l["ref_type"], "ref_id": l["ref_id"], "created_at": l["created_at"]} for l in ledgers],
+        "categories": [{"value": c, "method": CATEGORY_METHOD[c]} for c in sorted(ALL_PRODUCT_CATEGORIES)],
+    }
+
+
+@app.post("/api/admin/market/products")
+@app.post("/api/admin/market/items")
+def admin_create_market_item(payload: MarketItemIn, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    category = normalize_market_category(payload.category.value if isinstance(payload.category, ProductCategory) else str(payload.category))
+    try:
+        json.loads(payload.payload_json or "{}")
+    except Exception:
+        raise HTTPException(status_code=400, detail="商品参数 JSON 格式不正确")
+    with db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM market_items WHERE title=? AND category=? ORDER BY enabled DESC, id ASC LIMIT 1",
+            (payload.title.strip(), category),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE market_items SET description=?, price=?, stock=?, cover_icon=?, enabled=?, payload_json=?, updated_at=? WHERE id=?",
+                (payload.description.strip(), payload.price, payload.stock, payload.cover_icon.strip() or 'fa-gift', 1 if payload.enabled else 0, payload.payload_json or '{}', now(), existing["id"]),
+            )
+            return {"ok": True, "id": existing["id"], "updated": True}
+        cur = conn.execute(
+            "INSERT INTO market_items(title,description,price,stock,category,cover_icon,enabled,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (payload.title.strip(), payload.description.strip(), payload.price, payload.stock, category, payload.cover_icon.strip() or 'fa-gift', 1 if payload.enabled else 0, payload.payload_json or '{}', now(), now()),
+        )
+    return {"ok": True, "id": cur.lastrowid}
+
+
+@app.put("/api/admin/market/items/{item_id}")
+def admin_update_market_item(item_id: int, payload: MarketItemIn, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    category = normalize_market_category(payload.category.value if isinstance(payload.category, ProductCategory) else str(payload.category))
+    try:
+        json.loads(payload.payload_json or "{}")
+    except Exception:
+        raise HTTPException(status_code=400, detail="商品参数 JSON 格式不正确")
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE market_items SET title=?, description=?, price=?, stock=?, category=?, cover_icon=?, enabled=?, payload_json=?, updated_at=? WHERE id=?",
+            (payload.title.strip(), payload.description.strip(), payload.price, payload.stock, category, payload.cover_icon.strip() or 'fa-gift', 1 if payload.enabled else 0, payload.payload_json or '{}', now(), item_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="商品不存在")
+    return {"ok": True}
+
+
+@app.patch("/api/admin/market/items/{item_id}/enabled")
+def admin_set_market_item_enabled(item_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    enabled = 1 if bool(payload.get("enabled")) else 0
+    with db() as conn:
+        cur = conn.execute("UPDATE market_items SET enabled=?, updated_at=? WHERE id=?", (enabled, now(), item_id))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="商品不存在")
+    return {"ok": True, "enabled": bool(enabled)}
+
+
+@app.delete("/api/admin/market/items/{item_id}")
+def admin_delete_market_item(item_id: int, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    with db() as conn:
+        used = conn.execute("SELECT COUNT(*) FROM market_orders WHERE item_id=?", (item_id,)).fetchone()[0]
+        if used:
+            conn.execute("UPDATE market_items SET enabled=0, updated_at=? WHERE id=?", (now(), item_id))
+            return {"ok": True, "archived": True, "message": "已有兑换记录，已下架保留历史记录"}
+        cur = conn.execute("DELETE FROM market_items WHERE id=?", (item_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="商品不存在")
+    return {"ok": True}
+
+
+@app.post("/api/admin/market/add-keys")
+def admin_add_market_keys(payload: MarketKeysIn, authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    keys = []
+    seen = set()
+    for line in payload.keys_text.splitlines():
+        key = line.strip()
+        if key and key not in seen:
+            keys.append(key)
+            seen.add(key)
+    if not keys:
+        raise HTTPException(status_code=400, detail="没有可导入的卡密")
+    with db() as conn:
+        product = conn.execute("SELECT * FROM market_items WHERE id=?", (payload.product_id,)).fetchone()
+        if not product:
+            raise HTTPException(status_code=404, detail="商品不存在")
+        category = normalize_market_category(product["category"])
+        if fulfillment_method(category) != FulfillmentMethod.CARD_KEY.value:
+            raise HTTPException(status_code=400, detail="只有卡密类商品可以导入卡密")
+        inserted = 0
+        for key in keys:
+            try:
+                cur = conn.execute("INSERT OR IGNORE INTO product_card_keys(product_id,key_content,is_used,created_at) VALUES(?,?,0,?)", (payload.product_id, key, now()))
+                inserted += cur.rowcount
+            except sqlite3.IntegrityError:
+                pass
+    return {"ok": True, "inserted": inserted, "ignored": len(keys) - inserted}
+
+
+@app.put("/api/admin/market/orders/{order_id}/fulfill")
+def admin_fulfill_market_order(order_id: int, payload: MarketFulfillIn, authorization: str | None = Header(default=None)):
+    admin = require_admin(current_user(authorization))
+    with db() as conn:
+        order = conn.execute("SELECT * FROM market_orders WHERE id=?", (order_id,)).fetchone()
+        if not order:
+            raise HTTPException(status_code=404, detail="订单不存在")
+        if order["status"] != OrderStatus.PENDING.value:
+            raise HTTPException(status_code=400, detail="只有待处理订单可以手动发货")
+        category = normalize_market_category(order["category"])
+        if fulfillment_method(category) != FulfillmentMethod.MANUAL_PROCESS.value:
+            raise HTTPException(status_code=400, detail="该订单不是人工履约类型")
+        conn.execute("UPDATE market_orders SET status=?, delivered_content=?, fulfilled_at=?, fulfilled_by=? WHERE id=?", (OrderStatus.SUCCESS.value, payload.delivered_content.strip(), now(), admin["id"], order_id))
+    return {"ok": True}
 
 
 @app.get("/api/search")
@@ -1388,7 +2047,7 @@ def admin_overview(authorization: str | None = Header(default=None)):
         stats["comments"] = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
         recent_posts = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id
             ORDER BY p.id DESC LIMIT 8
@@ -1536,7 +2195,7 @@ def admin_posts(q: str = "", authorization: str | None = Header(default=None)):
     with db() as conn:
         rows = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id
             WHERE ?='' OR p.title LIKE ? OR p.content LIKE ? OR u.username LIKE ?

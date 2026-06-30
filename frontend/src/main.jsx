@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import { createPortal } from 'react-dom'
 import './styles.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
@@ -22,6 +23,7 @@ function onAvatarError(e) {
     img.style.display = 'none'
   }
 }
+function usernameClass(obj) { return obj?.display_flags?.red_username ? 'username-red' : '' }
 
 function currentRoute() {
   return location.pathname + location.search
@@ -117,6 +119,7 @@ function Nav({ me, setMe, path, site = defaultSite }) {
       <div className="navbar-menu">
         <a href="/" className={cls('/')}><i className="fas fa-home" /> 首页</a>
         <a href="/channels" className={cls('/channels')}><i className="fas fa-broadcast-tower" /> 频道</a>
+        <a href="/market" className={cls('/market')}><i className="fas fa-store" /> 泓市场</a>
         <a href="/games" className={cls('/games')}><i className="fas fa-gamepad" /> 小游戏</a>
         <a href="/music" className={cls('/music')}><i className="fas fa-music" /> 音乐</a>
         {me?.role === 'admin' && <a href="/admin" className={cls('/admin')}><i className="fas fa-shield-halved" /> 后台</a>}
@@ -190,6 +193,22 @@ function formatAbsoluteTime(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 function displayTime(s = '') { return s ? String(s).replace('T', ' ').slice(0, 19) : '' }
+function displayDate(s = '') {
+  const d = parseTimeValue(s)
+  if (!d) return s ? String(s).slice(0, 10) : ''
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+function orderStatusText(s = '') { return s === 'SUCCESS' ? '已完成' : s === 'PENDING' ? '待处理' : s === 'FAILED' ? '失败' : s }
+function decodeOrderNote(text = '') {
+  if (!text) return ''
+  try { const obj = JSON.parse(text); return obj.note || obj.address || Object.entries(obj).map(([k,v]) => `${k}: ${v}`).join(' / ') } catch { return text }
+}
+function OrderRow({ order }) {
+  const [open, setOpen] = useState(false)
+  const detail = decodeOrderNote(order.delivered_content || order.shipping_info || '')
+  return <div className="post-item order-row"><button type="button" className="order-row-main" onClick={() => setOpen(!open)}><div><div className="post-title"><i className={`fas ${order.cover_icon || 'fa-gift'}`} /> {order.title || order.item_title}</div><div className="post-meta"><span>{order.cost_points || order.price} 泓币</span><span>{relativeTime(order.created_at)}</span><span>{orderStatusText(order.status)}</span></div></div><i className={`fas ${open ? 'fa-chevron-up' : 'fa-chevron-down'}`} /></button>{open && <div className="order-detail"><p><b>兑换时间：</b>{displayTime(order.created_at)}</p><p><b>处理状态：</b>{orderStatusText(order.status)}</p>{detail ? <p><b>兑换详情：</b>{detail}</p> : <p><b>兑换详情：</b>{order.status === 'PENDING' ? '等待管理员处理' : '暂无额外内容'}</p>}{order.fulfilled_at && <p><b>完成时间：</b>{displayTime(order.fulfilled_at)}</p>}</div>}</div>
+}
 function communityAge(days) {
   if (days === null || days === undefined || days === '') return ''
   const n = Number(days)
@@ -208,12 +227,15 @@ function relativeTime(s = '') {
   if (!d) return s
   const diff = Math.max(0, Date.now() - d.getTime())
   const min = Math.floor(diff / 60000)
-  if (min < 2) return '1分钟前'
+  if (min < 1) return '刚刚'
   if (min < 60) return `${min}分钟前`
   const hours = Math.floor(min / 60)
   if (hours < 24) return `${hours}小时前`
-  if (hours < 48) return '一天前'
-  return formatAbsoluteTime(d)
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days}天前`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `${months}个月前`
+  return `${Math.floor(months / 12)}年前`
 }
 function sourceLinkLabel(url = '') {
   const u = String(url).toLowerCase()
@@ -224,16 +246,17 @@ function sourceLinkLabel(url = '') {
 
 function ProfileStats({ stats = {} }) {
   const items = [
-    ['加入社区', displayTime(stats.joined_at), 'fa-calendar-plus'],
+    ['加入社区', displayDate(stats.joined_at), 'fa-calendar-plus'],
     ['社区年龄', communityAge(stats.community_age_days), 'fa-seedling'],
     ['发布帖子', formatCount(stats.posts_count, ' 篇'), 'fa-pen-nib'],
     ['发出评论', formatCount(stats.comments_count, ' 条'), 'fa-comment-dots'],
     ['浏览帖子', formatCount(stats.views_count, ' 次'), 'fa-eye'],
     ['单帖最高评论', formatCount(stats.max_post_comments, ' 条'), 'fa-fire'],
-    ['最后活跃', displayTime(stats.last_active_at), 'fa-clock'],
+    ['最后活跃', relativeTime(stats.last_active_at), 'fa-clock'],
+    ['泓币资产', `${Number(stats.hongcoin_balance || 0).toLocaleString()} 枚`, 'fa-coins', 'market'],
   ].filter(x => x[1] !== '' && x[1] !== null && x[1] !== undefined)
   if (!items.length) return null
-  return <div className="profile-stats-grid">{items.map(([label, value, icon]) => <div className="profile-stat" key={label}><span><i className={`fas ${icon}`} /> {label}</span><b>{value}</b></div>)}</div>
+  return <div className="profile-stats-grid">{items.map(([label, value, icon, type]) => <div className={`profile-stat ${type === 'market' ? 'profile-stat-market' : ''}`} key={label}><span><i className={`fas ${icon}`} /> {label}</span><b>{value}</b>{type === 'market' && <a className="profile-market-entry" href="/market">进入泓市场 <i className="fas fa-arrow-right" /></a>}</div>)}</div>
 }
 
 function SiteFooter({ site = defaultSite }) {
@@ -259,7 +282,7 @@ function PostItem({ post }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div className="post-title">{post.pinned && <span className="pin-badge"><i className="fas fa-thumbtack" /> 置顶</span>}{post.title}</div>
         <div className="post-preview">{htmlText(post.preview || post.content)}</div>
-        <div className="post-meta"><div className="post-meta-item"><a href={`/user/${post.user_id}`} className="post-author-name" onClick={e => e.stopPropagation()}>{post.author}</a>{post.role && <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {post.role}</span>}</div><div className="post-meta-item"><i className="far fa-clock" /> {relativeTime(post.time)}</div><div className="post-stats"><span className="post-stat"><i className="far fa-comment" /> {post.comments || ''}</span><span className="post-stat"><i className="far fa-eye" /> {post.views || ''}</span></div></div>
+        <div className="post-meta"><div className="post-meta-item"><a href={`/user/${post.user_id}`} className={`post-author-name ${usernameClass(post)}`} onClick={e => e.stopPropagation()}>{post.author}</a>{post.role && <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {post.role}</span>}</div><div className="post-meta-item"><i className="far fa-clock" /> {relativeTime(post.time)}</div><div className="post-stats"><span className="post-stat"><i className="far fa-comment" /> {post.comments || ''}</span><span className="post-stat"><i className="far fa-eye" /> {post.views || ''}</span></div></div>
         {post.custom_title && <span className="custom-title" style={{ marginTop: 6 }}>{post.custom_title}</span>}
       </div>
     </div>
@@ -272,7 +295,7 @@ function Sidebar({ donors = [], notice = {} }) {
 }
 
 function UserResults({ users }) {
-  return <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-users" /> 用户搜索结果</h3></div><div className="card-body"><div className="user-grid">{users.length ? users.map(u => <a className="user-card" href={`/user/${u.id}`} key={u.id} style={{ textDecoration: 'none' }}><img className="user-card-avatar" loading="lazy" decoding="async" src={safeAvatar(u.avatar)} onError={onAvatarError} /><div className="user-card-name">{u.username}</div><div className="user-card-bio">{u.role_label || '社区用户'}</div></a>) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到用户</p></div>}</div></div></div>
+  return <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-users" /> 用户搜索结果</h3></div><div className="card-body"><div className="user-grid">{users.length ? users.map(u => <a className="user-card" href={`/user/${u.id}`} key={u.id} style={{ textDecoration: 'none' }}><img className="user-card-avatar" loading="lazy" decoding="async" src={safeAvatar(u.avatar)} onError={onAvatarError} /><div className={`user-card-name ${usernameClass(u)}`}>{u.username}</div><div className="user-card-bio">{u.role_label || '社区用户'}</div></a>) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到用户</p></div>}</div></div></div>
 }
 
 function Home() {
@@ -655,24 +678,74 @@ function RepliesBar({ replies = [], expanded, setExpanded, onJump }) {
   </div>
 }
 
+function CommentMenuPortal({ anchorRef, open, onClose, canEdit, canDelete, busy, onEdit, onRemove }) {
+  const [pos, setPos] = useState(null)
+  useEffect(() => {
+    if (!open) return
+    const update = () => {
+      const anchor = anchorRef.current
+      if (!anchor) return
+      const r = anchor.getBoundingClientRect()
+      const menuW = 128
+      const menuH = 92
+      const gap = 8
+      const spaceBelow = window.innerHeight - r.bottom
+      const dropup = spaceBelow < menuH + gap + 12 && r.top > menuH + gap
+      setPos({
+        left: Math.max(8, Math.min(window.innerWidth - menuW - 8, r.right - menuW)),
+        top: dropup ? Math.max(8, r.top - menuH - gap) : Math.min(window.innerHeight - menuH - 8, r.bottom + gap),
+        dropup,
+      })
+    }
+    update()
+    const close = e => {
+      if (anchorRef.current?.contains(e.target)) return
+      if (e.target.closest?.('.global-comment-menu')) return
+      onClose()
+    }
+    const esc = e => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    document.addEventListener('mousedown', close)
+    document.addEventListener('touchstart', close, { passive: true })
+    document.addEventListener('keydown', esc)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('touchstart', close)
+      document.removeEventListener('keydown', esc)
+    }
+  }, [open, anchorRef, onClose])
+  if (!open || !pos) return null
+  return createPortal(
+    <div className={`comment-menu global-comment-menu ${pos.dropup ? 'dropup' : 'dropdown'}`} style={{ left: pos.left, top: pos.top }}>
+      <button type="button" disabled={!canEdit} onClick={onEdit}><i className="fas fa-pen" /> 编辑</button>
+      <button type="button" disabled={!canDelete || busy} className="danger-link" onClick={onRemove}><i className="fas fa-trash" /> 删除</button>
+    </div>,
+    document.body
+  )
+}
+
 function CommentCard({ comment, onReply, onEdit, onDelete, directReplies = [], onJump, embedded = false }) {
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const moreBtnRef = useRef(null)
   const jump = onJump || ((id) => onReply({ ...comment, jump_to_id: id, quote_only: true }))
   async function remove() {
     if (!confirm('确定删除这条评论吗？如果没有人回复过，它会直接从评论区消失。')) return
     setBusy(true)
     try { await onDelete(comment); notify('评论已删除', 'success') } finally { setBusy(false) }
   }
-  return <article id={embedded ? undefined : `comment-${comment.id}`} className={`comment-card topic-post regular ${comment.deleted ? 'is-deleted' : ''} ${embedded ? 'reply-preview-card' : ''}`}>
+  return <article id={embedded ? undefined : `comment-${comment.id}`} className={`comment-card topic-post regular ${comment.deleted ? 'is-deleted' : ''} ${embedded ? 'reply-preview-card' : ''} ${menuOpen ? 'menu-active' : ''}`}>
     <div className="topic-avatar"><a href={`/user/${comment.user_id || ''}`}><img className="avatar" src={safeAvatar(comment.avatar)} alt="头像" loading="lazy" decoding="async" onError={onAvatarError} /></a></div>
     <div className="comment-main topic-body">
-      <div className="comment-head topic-meta-data"><div className="names"><span className="first"><a className="comment-author" href={`/user/${comment.user_id || ''}`}>{comment.author}</a></span>{comment.role && <span className="user-title">{comment.role}</span>}</div><div className="post-infos"><OutgoingReplyLink comment={comment} onJump={jump} /><time className="post-info">{relativeTime(comment.time)}</time>{comment.edited && <span className="edited-mark">已编辑 · {relativeTime(comment.updated_at)}</span>}</div></div>
+      <div className="comment-head topic-meta-data"><div className="names"><span className="first"><a className={`comment-author ${usernameClass(comment)}`} href={`/user/${comment.user_id || ''}`}>{comment.author}</a></span>{comment.role && <span className="user-title">{comment.role}</span>}</div><div className="post-infos"><OutgoingReplyLink comment={comment} onJump={jump} /><time className="post-info">{relativeTime(comment.time)}</time>{comment.edited && <span className="edited-mark">已编辑 · {relativeTime(comment.updated_at)}</span>}</div></div>
       <div className="regular-contents">
         {comment.deleted ? <div className="deleted-comment-box"><i className="fas fa-ban" /><div><strong>{comment.deleted_by_admin ? '此评论因违反社区规范已被管理员删除。' : '此评论已删除'}</strong>{comment.deleted_at && <span>删除于 {relativeTime(comment.deleted_at)}</span>}</div></div> : <MarkdownRenderer content={comment.content} compact />}
       </div>
-      {!embedded && !comment.deleted && <nav className="comment-actions post-controls"><div className="actions"><button type="button" className="reply create" title="回复" aria-label="回复" onClick={() => onReply(comment)}><i className="fas fa-reply" /></button>{(comment.can_edit || comment.can_delete) && <div className="comment-more"><button type="button" className="more-toggle" title="更多" aria-label="更多" onClick={() => setMenuOpen(v => !v)}><i className="fas fa-ellipsis" /></button>{menuOpen && <div className="comment-menu"><button type="button" disabled={!comment.can_edit} onClick={() => { setMenuOpen(false); onEdit(comment) }}><i className="fas fa-pen" /> 编辑</button><button type="button" disabled={!comment.can_delete || busy} className="danger-link" onClick={() => { setMenuOpen(false); remove() }}><i className="fas fa-trash" /> 删除</button></div>}</div>}</div></nav>}
+      {!embedded && !comment.deleted && <nav className="comment-actions post-controls"><div className="actions"><button type="button" className="reply create" title="回复" aria-label="回复" onClick={() => onReply(comment)}><i className="fas fa-reply" /></button>{(comment.can_edit || comment.can_delete) && <div className="comment-more"><button ref={moreBtnRef} type="button" className="more-toggle" title="更多" aria-label="更多" aria-expanded={menuOpen} onClick={() => setMenuOpen(v => !v)}><i className="fas fa-ellipsis" /></button><CommentMenuPortal anchorRef={moreBtnRef} open={menuOpen} onClose={() => setMenuOpen(false)} canEdit={comment.can_edit} canDelete={comment.can_delete} busy={busy} onEdit={() => { setMenuOpen(false); onEdit(comment) }} onRemove={() => { setMenuOpen(false); remove() }} /></div>}</div></nav>}
       {!embedded && <RepliesBar replies={directReplies} expanded={expanded} setExpanded={setExpanded} onJump={jump} />}
     </div>
   </article>
@@ -814,7 +887,7 @@ function PostDetail({ id, me }) {
         <div className="post-meta detail-meta">
           <div className="post-author">
             <img className="post-avatar" loading="lazy" decoding="async" src={safeAvatar(p.avatar)} alt="头像" onError={onAvatarError} />
-            <a className="post-author-name" href={`/user/${p.user_id}`}>{p.author}</a>
+            <a className={`post-author-name ${usernameClass(p)}`} href={`/user/${p.user_id}`}>{p.author}</a>
             {p.role ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {p.role.includes('超级') ? p.role : p.role === '超管' ? '超级管理员' : p.role}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}
           </div>
           {p.custom_title && <span className="custom-title">{p.custom_title}</span>}
@@ -843,43 +916,148 @@ function AvatarUploader({ onDone }) {
   const [file, setFile] = useState(null)
   const [preview, setPreview] = useState('')
   const [busy, setBusy] = useState(false)
-  const [crop, setCrop] = useState({ x: 50, y: 50, size: 220 })
+  const [ready, setReady] = useState(false)
+  const [scale, setScale] = useState(1)
+  const [offset, setOffset] = useState({ x: 0, y: 0 })
   const imgRef = useRef(null)
-  const pick = f => { if (!f) return; setFile(f); setPreview(URL.createObjectURL(f)); setCrop({ x: 50, y: 50, size: 220 }) }
-  const clampCrop = next => setCrop(c => ({
-    x: Math.max(0, Math.min(260 - next.size, next.x)),
-    y: Math.max(0, Math.min(260 - next.size, next.y)),
-    size: Math.max(80, Math.min(260, next.size)),
-  }))
-  function croppedBlob() {
-    return new Promise(resolve => {
-      const img = imgRef.current
-      if (!img || !preview) return resolve(file)
-      const box = img.getBoundingClientRect()
-      const sx = crop.x / box.width * img.naturalWidth
-      const sy = crop.y / box.height * img.naturalHeight
-      const ss = crop.size / box.width * img.naturalWidth
-      const canvas = document.createElement('canvas')
-      canvas.width = 512; canvas.height = 512
-      const ctx = canvas.getContext('2d')
-      ctx.drawImage(img, sx, sy, ss, ss, 0, 0, 512, 512)
-      canvas.toBlob(b => resolve(b || file), 'image/png', 0.92)
-    })
+  const stageRef = useRef(null)
+  const dragRef = useRef(null)
+  const cropSize = 220
+  const stageSize = 280
+  const cropLeft = (stageSize - cropSize) / 2
+  const cropTop = (stageSize - cropSize) / 2
+
+  const getContainSize = () => {
+    const img = imgRef.current
+    if (!img?.naturalWidth || !img?.naturalHeight) return { width: stageSize, height: stageSize }
+    const ratio = Math.min(stageSize / img.naturalWidth, stageSize / img.naturalHeight)
+    return { width: img.naturalWidth * ratio, height: img.naturalHeight * ratio }
+  }
+  const minScaleFor = (base = getContainSize()) => Math.max(1, cropSize / Math.max(1, base.width), cropSize / Math.max(1, base.height))
+  const maxScaleFor = (base = getContainSize()) => Math.max(3, minScaleFor(base) * 3)
+  const clampOffset = (next, nextScale = scale) => {
+    const base = getContainSize()
+    const safeScale = Math.min(maxScaleFor(base), Math.max(minScaleFor(base), Number(nextScale) || 1))
+    const w = base.width * safeScale
+    const h = base.height * safeScale
+    const minX = cropLeft + cropSize - w
+    const maxX = cropLeft
+    const minY = cropTop + cropSize - h
+    const maxY = cropTop
+    return {
+      x: Math.min(maxX, Math.max(minX, next.x)),
+      y: Math.min(maxY, Math.max(minY, next.y)),
+    }
+  }
+  const fitImage = () => {
+    setReady(true)
+    const base = getContainSize()
+    const initialScale = minScaleFor(base)
+    setScale(initialScale)
+    setOffset(clampOffset({ x: (stageSize - base.width * initialScale) / 2, y: (stageSize - base.height * initialScale) / 2 }, initialScale))
+  }
+  const pick = f => {
+    if (!f) return
+    if (!String(f.type || '').startsWith('image/')) return notify('请选择图片文件', 'error')
+    if (preview) URL.revokeObjectURL(preview)
+    setFile(f)
+    setReady(false)
+    setPreview(URL.createObjectURL(f))
+    setScale(1)
+    setOffset({ x: 0, y: 0 })
+  }
+  const setZoom = value => {
+    const base = getContainSize()
+    const nextScale = Math.min(maxScaleFor(base), Math.max(minScaleFor(base), Number(value) || 1))
+    const centerX = cropLeft + cropSize / 2
+    const centerY = cropTop + cropSize / 2
+    const oldScale = Math.max(minScaleFor(base), scale || 1)
+    const next = {
+      x: centerX - (centerX - offset.x) * (nextScale / oldScale),
+      y: centerY - (centerY - offset.y) * (nextScale / oldScale),
+    }
+    setScale(nextScale)
+    setOffset(clampOffset(next, nextScale))
+  }
+  const point = e => {
+    const t = e.touches?.[0] || e.changedTouches?.[0] || e
+    return { x: t.clientX, y: t.clientY }
+  }
+  const startDrag = e => {
+    if (!preview || busy) return
+    e.preventDefault()
+    const p = point(e)
+    dragRef.current = { x: p.x, y: p.y, start: offset }
+    window.addEventListener('mousemove', moveDrag, { passive: false })
+    window.addEventListener('mouseup', endDrag)
+    window.addEventListener('touchmove', moveDrag, { passive: false })
+    window.addEventListener('touchend', endDrag)
+  }
+  const moveDrag = e => {
+    const d = dragRef.current
+    if (!d) return
+    e.preventDefault()
+    const p = point(e)
+    setOffset(clampOffset({ x: d.start.x + p.x - d.x, y: d.start.y + p.y - d.y }))
+  }
+  const endDrag = () => {
+    dragRef.current = null
+    window.removeEventListener('mousemove', moveDrag)
+    window.removeEventListener('mouseup', endDrag)
+    window.removeEventListener('touchmove', moveDrag)
+    window.removeEventListener('touchend', endDrag)
+  }
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); endDrag() }, [preview])
+
+  function cropParams() {
+    const img = imgRef.current
+    if (!img?.naturalWidth || !img?.naturalHeight) throw new Error('图片尚未加载完成')
+    const base = getContainSize()
+    const renderedW = base.width * scale
+    const renderedH = base.height * scale
+    const x = (cropLeft - offset.x) / renderedW * img.naturalWidth
+    const y = (cropTop - offset.y) / renderedH * img.naturalHeight
+    const width = cropSize / renderedW * img.naturalWidth
+    const height = cropSize / renderedH * img.naturalHeight
+    const safeX = Math.max(0, Math.min(img.naturalWidth - 1, x))
+    const safeY = Math.max(0, Math.min(img.naturalHeight - 1, y))
+    return {
+      x: Math.round(safeX),
+      y: Math.round(safeY),
+      width: Math.round(Math.min(width, img.naturalWidth - safeX)),
+      height: Math.round(Math.min(height, img.naturalHeight - safeY)),
+    }
   }
   async function upload() {
     if (!file) return notify('请先选择头像', 'error')
     setBusy(true)
     try {
-      const blob = await croppedBlob()
-      const fd = new FormData(); fd.append('file', blob, 'avatar.png')
+      const c = cropParams()
+      const fd = new FormData()
+      fd.append('file', file, file.name || 'avatar.png')
+      fd.append('x', String(c.x))
+      fd.append('y', String(c.y))
+      fd.append('width', String(c.width))
+      fd.append('height', String(c.height))
       const res = await api('/api/me/avatar', { method:'POST', body: fd })
       localStorage.setItem('yhdet_user', JSON.stringify(res.user)); notify('头像已更新', 'success'); setOpen(false); onDone?.(res.user)
     }
     catch(e) { notify(e.message, 'error') } finally { setBusy(false) }
   }
+  const base = ready ? getContainSize() : { width: stageSize, height: stageSize }
+  const minZoom = ready ? minScaleFor(base) : 1
+  const maxZoom = ready ? maxScaleFor(base) : 3
+  const imageStyle = {
+    width: base.width, height: base.height,
+    transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${scale})`,
+  }
+  const modal = open ? createPortal(
+    <div className="modal-mask full-avatar-mask global-avatar-crop-layer" onClick={() => setOpen(false)}><div className="avatar-modal avatar-crop-modal" onClick={e => e.stopPropagation()}><h3><i className="fas fa-crop-simple" /> 上传并裁剪头像</h3><div className="drop-zone" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); pick(e.dataTransfer.files?.[0]) }}><input type="file" accept="image/*" onChange={e => pick(e.target.files?.[0])} /><p>点击选择或拖入图片</p><small>拖动图片调整位置，用滑块缩放；保存时由后端按原图像素裁剪</small></div>{preview && <div ref={stageRef} className="crop-stage" onMouseDown={startDrag} onTouchStart={startDrag}><img ref={imgRef} className="crop-image" src={preview} alt="裁剪" onLoad={fitImage} draggable="false" style={imageStyle} /><div className="crop-dim crop-dim-top" /><div className="crop-dim crop-dim-bottom" /><div className="crop-dim crop-dim-left" /><div className="crop-dim crop-dim-right" /><div className="crop-box" /></div>}{preview && <div className="crop-controls single"><label>缩放 <input type="range" min={minZoom} max={maxZoom} step="0.01" value={Math.max(minZoom, Math.min(maxZoom, scale))} onChange={e => setZoom(e.target.value)} /></label></div>}<div className="admin-actions"><button className="btn btn-primary" disabled={busy || !file || !ready} onClick={upload}>{busy ? '上传中' : '确认上传'}</button><button className="btn btn-secondary" onClick={() => setOpen(false)}>取消</button></div></div></div>,
+    document.body
+  ) : null
   return <>
     <button className="avatar-edit-btn" onClick={() => setOpen(true)} title="编辑头像"><i className="fas fa-pen" /></button>
-    {open && <div className="modal-mask full-avatar-mask" onClick={() => setOpen(false)}><div className="avatar-modal avatar-crop-modal" onClick={e => e.stopPropagation()}><h3><i className="fas fa-crop-simple" /> 上传并裁剪头像</h3><div className="drop-zone" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); pick(e.dataTransfer.files?.[0]) }}><input type="file" accept="image/*" onChange={e => pick(e.target.files?.[0])} /><p>点击选择或拖入图片</p><small>选择后拖动滑块裁剪正方形区域</small></div>{preview && <div className="crop-stage"><img ref={imgRef} className="crop-image" src={preview} alt="裁剪" /><div className="crop-box" style={{ left: crop.x, top: crop.y, width: crop.size, height: crop.size }} /></div>}{preview && <div className="crop-controls"><label>左右 <input type="range" min="0" max={Math.max(0, 260 - crop.size)} value={crop.x} onChange={e => clampCrop({ ...crop, x: Number(e.target.value) })} /></label><label>上下 <input type="range" min="0" max={Math.max(0, 260 - crop.size)} value={crop.y} onChange={e => clampCrop({ ...crop, y: Number(e.target.value) })} /></label><label>大小 <input type="range" min="80" max="260" value={crop.size} onChange={e => clampCrop({ ...crop, size: Number(e.target.value) })} /></label></div>}<div className="admin-actions"><button className="btn btn-primary" disabled={busy || !file} onClick={upload}>{busy ? '上传中' : '保存头像'}</button><button className="btn btn-secondary" onClick={() => setOpen(false)}>取消</button></div></div></div>}
+    {modal}
   </>
 }
 
@@ -888,33 +1066,41 @@ function UserPage({ id, me, setMe }) {
   const [postsPage, setPostsPage] = useState(1)
   const [commentsPage, setCommentsPage] = useState(1)
   const [sentCommentsPage, setSentCommentsPage] = useState(1)
+  const [ordersPage, setOrdersPage] = useState(1)
   const [loadingPosts, setLoadingPosts] = useState(false)
   const [loadingComments, setLoadingComments] = useState(false)
   const [loadingSentComments, setLoadingSentComments] = useState(false)
-  const [showPosts, setShowPosts] = useState(true)
-  const [showComments, setShowComments] = useState(true)
-  const [showSentComments, setShowSentComments] = useState(true)
+  const [loadingOrders, setLoadingOrders] = useState(false)
+  const [showPosts, setShowPosts] = useState(false)
+  const [showComments, setShowComments] = useState(false)
+  const [showSentComments, setShowSentComments] = useState(false)
+  const [showOrders, setShowOrders] = useState(false)
   const isMe = me && String(me.id) === String(id)
-  const fetchUser = (pp = 1, cp = 1, scp = 1) => api(`/api/users/${id}?posts_page=${pp}&comments_page=${cp}&sent_comments_page=${scp}&page_size=10`)
-  useEffect(() => { let alive = true; setData(null); setPostsPage(1); setCommentsPage(1); setSentCommentsPage(1); fetchUser(1,1,1).then(d => { if (alive) { setData(d); document.title = `${d.user.username} 的主页 - 泓聊社区`; if (location.hash === '#comments') setShowComments(true) } }); return () => { alive = false } }, [id])
-  useEffect(() => { if (!isMe) return; const t = setInterval(() => fetchUser(1,1,1).then(d => setData(old => old ? { ...old, unread_notifications: d.unread_notifications } : d)).catch(()=>{}), 5000); return () => clearInterval(t) }, [id, isMe])
+  const fetchUser = (pp = 1, cp = 1, scp = 1, op = 1) => api(`/api/users/${id}?posts_page=${pp}&comments_page=${cp}&sent_comments_page=${scp}&orders_page=${op}&page_size=10`)
+  useEffect(() => { let alive = true; setData(null); setPostsPage(1); setCommentsPage(1); setSentCommentsPage(1); setOrdersPage(1); setShowPosts(false); setShowComments(false); setShowSentComments(false); setShowOrders(false); fetchUser(1,1,1,1).then(d => { if (alive) { setData(d); document.title = `${d.user.username} 的主页 - 泓聊社区`; if (location.hash === '#comments') setShowComments(true) } }); return () => { alive = false } }, [id])
+  useEffect(() => { if (!isMe) return; const t = setInterval(() => fetchUser(1,1,1,1).then(d => setData(old => old ? { ...old, unread_notifications: d.unread_notifications } : d)).catch(()=>{}), 5000); return () => clearInterval(t) }, [id, isMe])
   if (!data) return <DetailSkeleton />
   const u = data.user
   const avatarDone = user => { setMe?.(user); setData(d => ({ ...d, user })); }
   async function morePosts() {
     if (!data.posts_has_more || loadingPosts) return
     setLoadingPosts(true)
-    try { const np = postsPage + 1; const d = await fetchUser(np, commentsPage, sentCommentsPage); setPostsPage(np); setData(old => ({ ...d, posts: [...(old?.posts || []), ...(d.posts || [])], received_comments: old?.received_comments || d.received_comments, sent_comments: old?.sent_comments || d.sent_comments })) } finally { setLoadingPosts(false) }
+    try { const np = postsPage + 1; const d = await fetchUser(np, commentsPage, sentCommentsPage, ordersPage); setPostsPage(np); setData(old => ({ ...d, posts: [...(old?.posts || []), ...(d.posts || [])], received_comments: old?.received_comments || d.received_comments, sent_comments: old?.sent_comments || d.sent_comments, market_orders: old?.market_orders || d.market_orders })) } finally { setLoadingPosts(false) }
   }
   async function moreComments() {
     if (!data.received_comments_has_more || loadingComments) return
     setLoadingComments(true)
-    try { const np = commentsPage + 1; const d = await fetchUser(postsPage, np, sentCommentsPage); setCommentsPage(np); setData(old => ({ ...d, posts: old?.posts || d.posts, received_comments: [...(old?.received_comments || []), ...(d.received_comments || [])], sent_comments: old?.sent_comments || d.sent_comments })) } finally { setLoadingComments(false) }
+    try { const np = commentsPage + 1; const d = await fetchUser(postsPage, np, sentCommentsPage, ordersPage); setCommentsPage(np); setData(old => ({ ...d, posts: old?.posts || d.posts, received_comments: [...(old?.received_comments || []), ...(d.received_comments || [])], sent_comments: old?.sent_comments || d.sent_comments, market_orders: old?.market_orders || d.market_orders })) } finally { setLoadingComments(false) }
   }
   async function moreSentComments() {
     if (!data.sent_comments_has_more || loadingSentComments) return
     setLoadingSentComments(true)
-    try { const np = sentCommentsPage + 1; const d = await fetchUser(postsPage, commentsPage, np); setSentCommentsPage(np); setData(old => ({ ...d, posts: old?.posts || d.posts, received_comments: old?.received_comments || d.received_comments, sent_comments: [...(old?.sent_comments || []), ...(d.sent_comments || [])] })) } finally { setLoadingSentComments(false) }
+    try { const np = sentCommentsPage + 1; const d = await fetchUser(postsPage, commentsPage, np, ordersPage); setSentCommentsPage(np); setData(old => ({ ...d, posts: old?.posts || d.posts, received_comments: old?.received_comments || d.received_comments, sent_comments: [...(old?.sent_comments || []), ...(d.sent_comments || [])], market_orders: old?.market_orders || d.market_orders })) } finally { setLoadingSentComments(false) }
+  }
+  async function moreOrders() {
+    if (!data.market_orders_has_more || loadingOrders) return
+    setLoadingOrders(true)
+    try { const np = ordersPage + 1; const d = await fetchUser(postsPage, commentsPage, sentCommentsPage, np); setOrdersPage(np); setData(old => ({ ...d, posts: old?.posts || d.posts, received_comments: old?.received_comments || d.received_comments, sent_comments: old?.sent_comments || d.sent_comments, market_orders: [...(old?.market_orders || []), ...(d.market_orders || [])] })) } finally { setLoadingOrders(false) }
   }
   async function readOne(c) {
     if (!isMe || !c.notification_id || c.read) return navigate(`/post/${c.post_id}#comment-${c.id}`)
@@ -932,9 +1118,10 @@ function UserPage({ id, me, setMe }) {
   }
   return <><PageChrome /><div className="main-content"><div className="detail-wrap">
     <div className="card animate-fadeInUp user-profile-card">
-      <div className="card-body user-profile-body"><div className="profile-head-row"><div className="avatar-wrap"><img className="profile-avatar" loading="lazy" decoding="async" src={safeAvatar(u.avatar)} alt="头像" onError={onAvatarError} />{isMe && <AvatarUploader onDone={avatarDone} />}</div><div className="profile-title-block"><h2 className="profile-name-with-badge">{u.username}</h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div></div><ProfileStats stats={data.profile_stats} /></div>
+      <div className="card-body user-profile-body"><div className="profile-head-row"><div className="avatar-wrap"><img className="profile-avatar" loading="lazy" decoding="async" src={safeAvatar(u.avatar)} alt="头像" onError={onAvatarError} />{isMe && <AvatarUploader onDone={avatarDone} />}</div><div className="profile-title-block"><h2 className={`profile-name-with-badge ${usernameClass(u)}`}>{u.username}</h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div></div><ProfileStats stats={data.profile_stats} /></div>
     </div>
     <div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-pen-nib" style={{ color: 'var(--primary)' }} /> TA 的帖子 <span className="mini-busy">{data.posts_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowPosts(!showPosts)}>{showPosts ? '折叠' : '展开'}</button></div>{showPosts && <div>{data.posts.length ? data.posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-feather-pointed" /><p>TA 还没有发表过帖子</p></div>}{data.posts_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={morePosts} disabled={loadingPosts}>{loadingPosts ? '加载中...' : '加载更多帖子'}</button></div>}</div>}</div>
+    {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.08s' }}><div className="card-header fold-head"><h3><i className="fas fa-receipt" style={{ color: '#f59e0b' }} /> 我的兑换记录 <span className="mini-busy">{data.market_orders_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data.market_orders?.length ? data.market_orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}{data.market_orders_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreOrders} disabled={loadingOrders}>{loadingOrders ? '加载中...' : '加载更多兑换记录'}</button></div>}</div>}</div>}
     {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.1s' }}><div className="card-header fold-head"><h3><i className="fas fa-message" style={{ color: 'var(--secondary)' }} /> 被评论消息 {data.unread_notifications > 0 && <span className="bubble-badge red-badge inline-bubble">{data.unread_notifications > 99 ? '99+' : data.unread_notifications}</span>}</h3><div className="admin-actions">{data.unread_notifications > 0 && <button className="btn btn-sm btn-secondary" onClick={readAll}>全部已读</button>}<button className="btn btn-sm btn-secondary" onClick={() => setShowComments(!showComments)}>{showComments ? '折叠' : '展开'}</button></div></div>{showComments && <div>{data.received_comments?.length ? data.received_comments.map(c => <button className={`post-item notification-row ${!c.read ? 'is-unread' : ''}`} onClick={() => readOne(c)} key={c.id}><div className="reply-row"><img className="post-avatar" src={safeAvatar(c.avatar)} onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><b>{c.author} 评论了你的帖子</b><span>{relativeTime(c.time)}</span></div><div className="post-preview">《{c.post_title}》</div></div>{!c.read && <span className="unread-dot" />}</div></button>) : <div className="empty-state"><i className="fas fa-comment-slash" /><p>暂无被评论消息</p></div>}{data.received_comments_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreComments} disabled={loadingComments}>{loadingComments ? '加载中...' : '加载更多评论'}</button></div>}</div>}</div>}
     {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.12s' }}><div className="card-header fold-head"><h3><i className="fas fa-paper-plane" style={{ color: '#16a34a' }} /> 我发出的评论 <span className="mini-busy">{data.sent_comments_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowSentComments(!showSentComments)}>{showSentComments ? '折叠' : '展开'}</button></div>{showSentComments && <div>{data.sent_comments?.length ? data.sent_comments.map(c => <a className="post-item notification-row sent-comment-row" href={`/post/${c.post_id}#comment-${c.id}`} key={c.id}><div className="reply-row"><img className="post-avatar" src={safeAvatar(c.owner_avatar)} onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><b>回复了 {c.owner_name} 的帖子</b><span>{relativeTime(c.time)}</span></div><div className="post-preview">《{c.post_title}》</div><div className="sent-comment-content">{c.content}</div></div></div></a>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>还没有发出过评论</p></div>}{data.sent_comments_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreSentComments} disabled={loadingSentComments}>{loadingSentComments ? '加载中...' : '加载更多发出的评论'}</button></div>}</div>}</div>}
     <div className="back-home"><a className="btn btn-secondary" href="/"><i className="fas fa-arrow-left" /> 返回首页</a></div>
@@ -957,6 +1144,7 @@ function AdminPage({ me }) {
     ['announcements', '公告', 'fa-bullhorn'],
     ['donors', '捐赠者', 'fa-heart'],
     ['channels', '频道', 'fa-broadcast-tower'],
+    ['market', '泓市场', 'fa-store'],
     ['settings', '系统设置', 'fa-gear'],
   ]
   const [tab, setTab] = useState('overview')
@@ -1000,6 +1188,7 @@ function AdminPage({ me }) {
     {tab === 'announcements' && <AdminAnnouncements items={items} draft={draft} setDraft={setDraft} run={run} />}
     {tab === 'donors' && <AdminDonors items={items} draft={draft} setDraft={setDraft} run={run} />}
     {tab === 'channels' && <AdminChannels data={data.channels} draft={draft} setDraft={setDraft} run={run} />}
+    {tab === 'market' && <AdminMarket data={data.market} draft={draft} setDraft={setDraft} run={run} />}
     {tab === 'settings' && <AdminSettings data={data.settings} draft={draft} setDraft={setDraft} run={run} />} 
   </div>
 }
@@ -1075,6 +1264,87 @@ function AdminUsers({ items, run }) {
 function AdminAnnouncements({ items, draft, setDraft, run }) { return <div className="admin-card"><h3>公告管理</h3><div className="admin-create"><input className="form-input" placeholder="新公告内容" value={draft.announcement || ''} onChange={e => setDraft({ ...draft, announcement: e.target.value })} /><button className="btn btn-primary" onClick={() => draft.announcement?.trim() && run(() => api('/api/admin/announcements', { method:'POST', body: JSON.stringify({ content: draft.announcement.trim() }) }).then(() => setDraft({ ...draft, announcement: '' })))}>发布公告</button></div>{items.map(a => <div className="admin-row" key={a.id}><div><b>{a.content}</b><p>{a.author} · {a.created_at}</p></div><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除公告？') && run(() => api(`/api/admin/announcements/${a.id}`, { method:'DELETE' }))}>删除</button></div>)}</div> }
 function AdminDonors({ items, draft, setDraft, run }) { const d = draft.donor || {}; return <div className="admin-card"><h3>捐赠者管理</h3><div className="admin-create donor-create"><input className="form-input" placeholder="名称" value={d.name || ''} onChange={e => setDraft({ ...draft, donor: { ...d, name: e.target.value } })} /><input className="form-input" placeholder="金额，如 3元" value={d.amount || ''} onChange={e => setDraft({ ...draft, donor: { ...d, amount: e.target.value } })} /><input className="form-input" placeholder="日期，如 2026.6.29" value={d.donated_at || ''} onChange={e => setDraft({ ...draft, donor: { ...d, donated_at: e.target.value } })} /><button className="btn btn-primary" onClick={() => d.name?.trim() && d.amount?.trim() && d.donated_at?.trim() && run(() => api('/api/admin/donors', { method:'POST', body: JSON.stringify({ name: d.name.trim(), amount: d.amount.trim(), donated_at: d.donated_at.trim() }) }).then(() => setDraft({ ...draft, donor: {} })))}>添加</button></div>{items.map(x => <div className="admin-row" key={x.id}><div><b>{x.name}</b><p>{x.amount} · {x.donated_at}</p></div><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除捐赠记录？') && run(() => api(`/api/admin/donors/${x.id}`, { method:'DELETE' }))}>删除</button></div>)}</div> }
 
+function AdminMarket({ data, draft, setDraft, run }) {
+  const items = data?.items || []
+  const orders = data?.orders || []
+  const ledgers = data?.ledgers || []
+  const empty = { title:'', description:'', price:0, stock:-1, category:'GIFT_GENERAL', cover_icon:'fa-gift', enabled:true, payload_json:'{}' }
+  const categoryOptions = [
+    ['GIFT_GENERAL', '🎁 礼物/通用商品 · 自动发卡密'],
+    ['COUPON_TICKET', '🎫 优惠券/兑换券 · 自动发卡密'],
+    ['GAME_ITEM', '🎮 游戏道具 · 自动发卡密'],
+    ['MEMBER_BENEFIT', '👑 会员/身份权益 · 即时生效'],
+    ['THEME_DRESSUP', '🎨 主题/装扮 · 即时生效'],
+    ['RARE_PERK', '💎 稀有权益 · 即时生效'],
+    ['COFFEE_SPONSOR', '☕ 咖啡/赞助 · 人工处理'],
+    ['PERIPHERAL_PHYSICAL', '👕 周边/实物 · 人工发货'],
+  ]
+  const categoryIcons = { GIFT_GENERAL:'fa-gift', COUPON_TICKET:'fa-ticket', GAME_ITEM:'fa-gamepad', MEMBER_BENEFIT:'fa-crown', THEME_DRESSUP:'fa-palette', RARE_PERK:'fa-gem', COFFEE_SPONSOR:'fa-mug-hot', PERIPHERAL_PHYSICAL:'fa-shirt' }
+  const systemProducts = {
+    MEMBER_BENEFIT: [
+      { title:'改名卡', description:'兑换后提交想修改的新昵称，管理员审核后处理。', cover_icon:'fa-id-card', payload_json:'{"request_type":"rename"}' },
+      { title:'头衔申请券', description:'提交你想展示的个人头衔，管理员审核后处理。', cover_icon:'fa-crown', payload_json:'{"request_type":"custom_title"}' },
+      { title:'VIP会员30天', description:'系统自动开通 VIP 身份 30 天。', cover_icon:'fa-crown', payload_json:'{"vip_days":30}' },
+      { title:'VIP会员90天', description:'系统自动开通 VIP 身份 90 天。', cover_icon:'fa-crown', payload_json:'{"vip_days":90}' },
+    ],
+    THEME_DRESSUP: [
+      { title:'深色主题', description:'系统自动解锁深色主题。', cover_icon:'fa-palette', payload_json:'{"theme_id":"dark"}' },
+    ],
+    RARE_PERK: [
+      { title:'红色用户名', description:'稀有权益：用户名显示为红色，覆盖个人信息面板、帖子列表和评论区。', cover_icon:'fa-gem', payload_json:'{"perk":"red_username"}' },
+    ],
+  }
+  const item = draft.marketItem || empty
+  const editing = Boolean(item.id)
+  const cardCats = new Set(['GIFT_GENERAL','COUPON_TICKET','GAME_ITEM'])
+  const directCats = new Set(['MEMBER_BENEFIT','THEME_DRESSUP','RARE_PERK'])
+  const currentSystemProducts = systemProducts[item.category] || []
+  const selectedSystemProduct = currentSystemProducts.find(p => p.title === item.title) || currentSystemProducts[0]
+  const normalizeItem = src => directCats.has(src.category) && selectedSystemProduct ? { ...src, ...selectedSystemProduct } : { ...src, cover_icon: src.cover_icon || categoryIcons[src.category] || 'fa-gift', payload_json: src.payload_json || '{}' }
+  const save = () => {
+    const payload = normalizeItem({ ...item, price:Number(item.price || 0), stock:Number(item.stock ?? -1), enabled:item.enabled !== false })
+    return run(() => api(editing ? `/api/admin/market/items/${item.id}` : '/api/admin/market/products', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(payload) }).then(() => setDraft({ ...draft, marketItem: empty })))
+  }
+  const edit = x => setDraft({ ...draft, marketItem: { ...x, enabled: Boolean(x.enabled), payload_json:x.payload_json || '{}' } })
+  const setCategory = category => {
+    const products = systemProducts[category] || []
+    const first = products[0]
+    setDraft({ ...draft, marketItem: { ...item, category, cover_icon: categoryIcons[category] || 'fa-gift', ...(first ? first : { title:'', description:item.description || '', payload_json:'{}' }) } })
+  }
+  const setSystemProduct = title => {
+    const picked = currentSystemProducts.find(p => p.title === title) || currentSystemProducts[0]
+    if (picked) setDraft({ ...draft, marketItem: { ...item, ...picked } })
+  }
+  const addKeys = x => {
+    const keys = prompt(`给「${x.title}」导入卡密，一行一个：`, '')
+    if (!keys?.trim()) return
+    run(() => api('/api/admin/market/add-keys', { method:'POST', body: JSON.stringify({ product_id:x.id, keys_text:keys }) }))
+  }
+  const setEnabled = (x, enabled) => run(() => api(`/api/admin/market/items/${x.id}/enabled`, { method:'PATCH', body: JSON.stringify({ enabled }) }))
+  const fulfill = o => {
+    const text = prompt(`处理订单 #${o.id}，填写快递单号或处理结果：`, o.delivered_content || '')
+    if (!text?.trim()) return
+    run(() => api(`/api/admin/market/orders/${o.id}/fulfill`, { method:'PUT', body: JSON.stringify({ delivered_content:text.trim() }) }))
+  }
+  return <div className="admin-card"><h3>泓市场后台</h3>
+    <div className="admin-create market-admin-create">
+      {directCats.has(item.category) ? <select className="form-input" value={selectedSystemProduct?.title || item.title || ''} onChange={e => setSystemProduct(e.target.value)}>{currentSystemProducts.map(p => <option key={p.title} value={p.title}>{p.title}</option>)}</select> : <input className="form-input" placeholder="商品名" value={item.title || ''} onChange={e => setDraft({ ...draft, marketItem: { ...item, title:e.target.value, cover_icon: categoryIcons[item.category] || item.cover_icon || 'fa-gift' } })} />}
+      <input className="form-input" type="number" min="0" placeholder="价格" value={item.price ?? 0} onChange={e => setDraft({ ...draft, marketItem: { ...item, price:e.target.value } })} />
+      <input className="form-input" type="number" min="-1" placeholder="库存，-1为不限" value={item.stock ?? -1} onChange={e => setDraft({ ...draft, marketItem: { ...item, stock:e.target.value } })} />
+      <select className="form-input" value={item.category || 'GIFT_GENERAL'} onChange={e => setCategory(e.target.value)}>{categoryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+      <textarea className="form-textarea channel-desc" placeholder="商品说明" value={directCats.has(item.category) ? (selectedSystemProduct?.description || item.description || '') : (item.description || '')} readOnly={directCats.has(item.category)} onChange={e => setDraft({ ...draft, marketItem: { ...item, description:e.target.value } })} />
+      <label className="channel-enabled"><input type="checkbox" checked={item.enabled !== false} onChange={e => setDraft({ ...draft, marketItem: { ...item, enabled:e.target.checked } })} /> 上架</label>
+      <div className="admin-actions"><button className="btn btn-primary" disabled={!item.title?.trim()} onClick={save}>{editing ? '保存商品' : '创建商品'}</button>{editing && <button className="btn btn-secondary" onClick={() => setDraft({ ...draft, marketItem: empty })}>取消编辑</button>}</div>
+    </div>
+    <h3>商品列表</h3>
+    {items.map(x => <div className="admin-row" key={x.id}><div><b><i className={`fas ${x.cover_icon || 'fa-gift'}`} /> {x.title}</b><p>{x.price} 泓币 · {x.stock < 0 ? '不限库存' : `库存 ${x.stock}`} · {x.enabled ? '上架中' : '已下架'} · {x.fulfillment_method}</p><small>{x.description}{cardCats.has(x.category) ? ` · 可用卡密 ${x.card_key_available || 0}` : ''}{x.orders_count ? ` · 兑换记录 ${x.orders_count} 条` : ''}</small></div><div className="admin-actions"><button className="btn btn-sm btn-secondary" onClick={() => edit(x)}>编辑</button>{cardCats.has(x.category) && <button className="btn btn-sm btn-secondary" onClick={() => addKeys(x)}>导入卡密</button>}{x.enabled ? <button className="btn btn-sm btn-secondary" onClick={() => setEnabled(x, false)}>下架</button> : <button className="btn btn-sm btn-primary" onClick={() => setEnabled(x, true)}>重新上架</button>}<button className="btn btn-sm btn-danger" onClick={() => confirm(x.orders_count ? '这个商品已有兑换记录，将下架并保留历史记录。确定继续？' : '确定永久删除这个商品？') && run(() => api(`/api/admin/market/items/${x.id}`, { method:'DELETE' }))}>{x.orders_count ? '删除/下架' : '永久删除'}</button></div></div>)}
+    <h3>最近兑换</h3>
+    {orders.length ? orders.map(o => <div className="admin-row" key={o.id}><div><b>{o.username} 兑换 {o.item_title}</b><p>{o.cost_points || o.price} 泓币 · {o.status === 'PENDING' ? '待处理' : '已完成'} · {displayTime(o.created_at)}</p><small>{o.shipping_info ? `收货/备注：${o.shipping_info}` : ''} {o.delivered_content ? `结果：${o.delivered_content}` : ''}</small></div><div className="admin-actions">{o.status === 'PENDING' && <button className="btn btn-sm btn-primary" onClick={() => fulfill(o)}>处理/发货</button>}</div></div>) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}
+    <h3>积分流水</h3>
+    {ledgers.length ? ledgers.map(l => <div className="admin-line" key={l.id}><span>{l.username} · {l.reason}</span><span className={l.delta >= 0 ? 'ledger-plus' : 'ledger-minus'}>{l.delta > 0 ? '+' : ''}{l.delta}</span></div>) : <div className="empty-state"><i className="fas fa-coins" /><p>暂无流水</p></div>}
+  </div>
+}
+
 
 function AdminSettings({ data, draft, setDraft, run }) {
   const s = draft.settings || data?.settings || {}
@@ -1099,6 +1369,50 @@ function AdminSettings({ data, draft, setDraft, run }) {
   </div>
 }
 
+
+function MarketPage({ me }) {
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(0)
+  const [showOrders, setShowOrders] = useState(true)
+  const load = () => api('/api/market').then(d => { setData(d); document.title = '泓市场 - 泓聊社区' }).catch(e => setErr(e.message))
+  useEffect(() => { document.title = '泓市场 - 泓聊社区'; setData(null); setErr(''); load() }, [])
+  async function buy(item) {
+    const body = { item_id: item.id }
+    if (item.category === 'PERIPHERAL_PHYSICAL') {
+      const shipping_name = prompt('收货人姓名：', '')
+      if (!shipping_name?.trim()) return
+      const shipping_phone = prompt('联系电话：', '')
+      if (!shipping_phone?.trim()) return
+      const shipping_address = prompt('收货地址：', '')
+      if (!shipping_address?.trim()) return
+      Object.assign(body, { shipping_name:shipping_name.trim(), shipping_phone:shipping_phone.trim(), shipping_address:shipping_address.trim() })
+    }
+    if (item.title === '改名卡') {
+      const request_note = prompt('请输入想修改的新昵称：', '')
+      if (!request_note?.trim()) return
+      body.request_note = `新昵称：${request_note.trim()}`
+    }
+    if (item.title === '头衔申请券') {
+      const request_note = prompt('请输入想申请的个人头衔：', '')
+      if (!request_note?.trim()) return
+      body.request_note = `申请头衔：${request_note.trim()}`
+    }
+    if (!confirm(`确定花费 ${item.price} 泓币兑换「${item.title}」？`)) return
+    setBusy(item.id); setErr('')
+    try { const r = await api('/api/market/buy', { method:'POST', body: JSON.stringify(body) }); notify(r.status === 'PENDING' ? '兑换成功，等待管理员处理' : '兑换成功', 'success'); setData(d => ({ ...d, balance: r.balance })); load() }
+    catch (e) { setErr(e.message); notify(e.message, 'error') }
+    finally { setBusy(0) }
+  }
+  async function checkin() {
+    setErr('')
+    try { const r = await api('/api/points/checkin', { method:'POST' }); notify(r.already ? `今天已签到，连续 ${r.streak} 天` : `签到成功 +${r.earned} 泓币，连续 ${r.streak} 天`, 'success'); setData(d => ({ ...d, balance:r.balance })) }
+    catch (e) { setErr(e.message); notify(e.message, 'error') }
+  }
+  if (!me) return <><PageChrome /><div className="main-content"><div className="alert alert-info">请先 <a href="/login">登录</a> 后进入泓市场</div></div></>
+  if (!data && !err) return <HomeSkeleton />
+  return <><PageChrome /><div className="main-content"><div className="market-hero card animate-fadeInUp"><div className="card-body"><span className="channel-pill">泓市场</span><h1>{Number(data?.balance || 0).toLocaleString()} <small>泓币</small></h1><p>发帖和评论获得泓币，可兑换社区权益。</p><button className="btn btn-secondary" onClick={checkin}><i className="fas fa-calendar-check" /> 每日签到</button><div className="market-rules">{(data?.rules || []).map(x => <span key={x}>{x}</span>)}</div></div></div>{err && <div className="alert alert-error">{err}</div>}<div className="market-grid">{data?.items?.map(item => <div className="market-card card" key={item.id}><div className="market-icon"><i className={`fas ${item.cover_icon || 'fa-gift'}`} /></div><div className="market-card-body"><h3>{item.title}</h3><p>{item.description}</p><div className="market-meta"><b>{item.price} 泓币</b><span>{item.stock < 0 ? '不限量' : `库存 ${item.stock}`}</span></div><button className="btn btn-primary" disabled={busy === item.id || item.stock === 0 || (data.balance || 0) < item.price} onClick={() => buy(item)}><i className={`fas ${busy === item.id ? 'fa-spinner fa-spin' : 'fa-bag-shopping'}`} /> {(data.balance || 0) < item.price ? '泓币不足' : item.stock === 0 ? '已售罄' : '兑换'}</button></div></div>)}</div><div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-receipt" /> 我的兑换记录</h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data?.orders?.length ? data.orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}</div>}</div></div></>
+}
 
 function ChannelsPage() {
   const [data, setData] = useState(null)
@@ -1230,6 +1544,7 @@ function App() {
     if (pathname === '/register') return <AuthPage mode="register" setMe={setMe} site={site} />
     if (pathname === '/new') return <NewPost me={me} />
     if (pathname === '/channels') return <ChannelsPage />
+    if (pathname === '/market') return <MarketPage me={me} />
     if (pathname.startsWith('/channels/')) return <ChannelDetail slug={pathname.split('/')[2]} />
     if (pathname.startsWith('/channel-post/')) return <ChannelPostDetail id={pathname.split('/')[2]} me={me} />
     if (pathname === '/admin') return <AdminPage me={me} />
