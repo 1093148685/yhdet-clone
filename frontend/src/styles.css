@@ -903,14 +903,17 @@
   .comment-list { padding: 0 12px 12px; }
   .comments-title-row { align-items: flex-start; flex-direction: column; }
   .presence-bar, .presence-activity { white-space: normal; }
-  .comment-card.topic-post { grid-template-columns: 46px minmax(0,1fr); }
-  .topic-avatar { padding: 13px 10px 0 0; }
-  .topic-avatar .avatar { width: 36px; height: 36px; }
-  .topic-body { padding: 12px 0; }
-  .topic-meta-data { align-items: flex-start; flex-direction: column; gap: 2px; }
-  .topic-meta-data .names { flex-wrap: wrap; gap: 5px; }
+  .comment-card.topic-post { grid-template-columns: 40px minmax(0,1fr); column-gap: 12px; }
+  .topic-avatar { padding: 12px 0 0; text-align: left; }
+  .topic-avatar-ring { width: 38px !important; height: 38px !important; }
+  .topic-avatar .avatar { width: 38px; height: 38px; }
+  .topic-body { padding: 11px 0 12px; }
+  .topic-meta-data { align-items: flex-start; flex-direction: column; gap: 3px; padding-bottom: 7px; }
+  .topic-meta-data .names { flex-wrap: wrap; gap: 6px; line-height: 1.25; }
+  .comment-author { font-size: .94rem; max-width: 100%; }
+  .reply-preview-card { grid-template-columns: 30px minmax(0,1fr); column-gap: 9px; }
+  .reply-preview-card .topic-avatar-ring { width: 30px !important; height: 30px !important; }
   .post-infos { font-size: .74rem; }
-  .reply-ref.embedded-reply { display: flex; max-width: 100%; }
   .comment-actions.post-controls { opacity: 1; justify-content: flex-end; padding-right: 0; }
   .comment-actions.post-controls .actions { margin-left: auto; flex-wrap: nowrap; }
   .editor-actions { align-items: stretch; flex-direction: column; }
