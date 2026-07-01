@@ -149,12 +149,16 @@ AVATAR_BORDER_PRODUCTS = {
     "avatar_border_google": {"title": "谷歌至尊四色环", "tier": "神话级", "price": 500, "style": "conic-gradient(#4285F4, #EA4335, #FBBC05, #34A853, #4285F4)", "icon": "fa-gem", "desc": "谷歌官方四色渐变头像环，神话级尊贵标识。"},
 }
 
+PROFILE_THEME_KEYS = {"morning_blue", "peach_blush", "mint_glass", "lavender_mist", "sunset_gold"}
+RETIRED_MARKET_ITEM_TITLES = {"薄荷绿头像环", "昵称小星星", "即时头衔·泓聊居民", "淡蓝评论纸"}
+RETIRED_COSMETIC_KEYS = {"avatar_ring_mint", "star", "soft_blue"}
+
 MARKET_DRESSUP_PRODUCTS = [
-    {"title": "薄荷绿头像环", "desc": "兑换后头像外圈变成清爽薄荷绿细环，帖子、评论和个人主页立即生效。", "price": 80, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-circle", "payload": {"effect": "avatar_border_style", "key": "avatar_ring_mint", "style": "#8FE3C2", "tier": "薄荷绿"}},
-    {"title": "昵称小星星", "desc": "兑换后昵称旁显示一枚低调小星星，在帖子、评论和个人主页立即可见。", "price": 120, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-star", "payload": {"effect": "username_badge", "key": "star", "label": "★"}},
-    {"title": "即时头衔·泓聊居民", "desc": "兑换后立刻获得“泓聊居民”头衔，展示在个人资料和帖子作者信息旁。", "price": 160, "stock": -1, "category": ProductCategory.MEMBER_BENEFIT.value, "icon": "fa-certificate", "payload": {"effect": "custom_title", "title": "泓聊居民"}},
-    {"title": "主页背景·清晨蓝", "desc": "兑换后个人主页资料卡切换为清晨蓝浅渐变背景。", "price": 220, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-image", "payload": {"effect": "profile_theme", "key": "morning_blue"}},
-    {"title": "淡蓝评论纸", "desc": "兑换后你的评论内容区域呈现极淡蓝评论纸效果，保持克制不影响阅读。", "price": 150, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-note-sticky", "payload": {"effect": "comment_theme", "key": "soft_blue"}},
+    {"title": "主页背景·清晨蓝", "desc": "个人主页资料卡切换为清晨蓝浅渐变背景，清爽克制。", "price": 220, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-image", "payload": {"effect": "profile_theme", "key": "morning_blue"}},
+    {"title": "主页背景·桃雾粉", "desc": "个人主页资料卡切换为低饱和桃粉渐变，柔和不刺眼。", "price": 220, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-image", "payload": {"effect": "profile_theme", "key": "peach_blush"}},
+    {"title": "主页背景·薄荷玻璃", "desc": "个人主页资料卡切换为薄荷绿玻璃感浅色背景。", "price": 220, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-image", "payload": {"effect": "profile_theme", "key": "mint_glass"}},
+    {"title": "主页背景·薰衣草雾", "desc": "个人主页资料卡切换为淡紫雾面背景，适合低调装饰。", "price": 220, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-image", "payload": {"effect": "profile_theme", "key": "lavender_mist"}},
+    {"title": "主页背景·日落金", "desc": "个人主页资料卡切换为浅金日落渐变，温暖但不夸张。", "price": 220, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-image", "payload": {"effect": "profile_theme", "key": "sunset_gold"}},
 ]
 
 DIRECT_EFFECT_CATEGORIES = {ProductCategory.MEMBER_BENEFIT.value, ProductCategory.THEME_DRESSUP.value, ProductCategory.RARE_PERK.value}
@@ -706,6 +710,7 @@ def init_db() -> None:
                 "UPDATE market_items SET description=?, category=?, cover_icon=?, payload_json=?, updated_at=? WHERE title=?",
                 (product["desc"], product["category"], product["icon"], payload_json, now(), product["title"]),
             )
+        retire_removed_market_cosmetics(conn)
         conn.execute("UPDATE users SET avatar_border_style=? WHERE COALESCE(avatar_border_style,'')=''", (DEFAULT_AVATAR_BORDER_STYLE,))
         reconcile_successful_cosmetic_orders(conn)
         conn.execute("UPDATE market_items SET description=?, payload_json=?, category=?, cover_icon=?, price=CASE WHEN COALESCE(price,0)<=0 THEN 188 ELSE price END, updated_at=? WHERE title='改名卡'", ("兑换后提交想修改的新昵称，管理员审核后处理。", '{"request_type":"rename"}', ProductCategory.MEMBER_BENEFIT.value, 'fa-id-card', now()))
@@ -2211,7 +2216,7 @@ def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category:
             return f"昵称图标已生效：{label}"
         if effect == "profile_theme":
             key = str(payload.get("key") or "").strip()[:40]
-            if key not in {"morning_blue"}:
+            if key not in PROFILE_THEME_KEYS:
                 raise HTTPException(status_code=400, detail="主页背景配置异常")
             conn.execute("UPDATE users SET profile_theme=? WHERE id=?", (key, user_id))
             return "个人主页背景已生效"
@@ -2291,6 +2296,18 @@ def shipping_text(payload: MarketBuyIn) -> str:
     return json.dumps({"name": name, "phone": phone, "address": address}, ensure_ascii=False)
 
 
+def retire_removed_market_cosmetics(conn: sqlite3.Connection) -> None:
+    placeholders = ",".join("?" for _ in RETIRED_MARKET_ITEM_TITLES)
+    conn.execute(
+        f"UPDATE market_items SET enabled=0, updated_at=? WHERE title IN ({placeholders})",
+        [now(), *sorted(RETIRED_MARKET_ITEM_TITLES)],
+    )
+    conn.execute("UPDATE users SET username_badge='' WHERE username_badge='★'")
+    conn.execute("UPDATE users SET comment_theme='' WHERE comment_theme='soft_blue'")
+    conn.execute("UPDATE users SET avatar_border_style=? WHERE avatar_border_style='#8FE3C2'", (DEFAULT_AVATAR_BORDER_STYLE,))
+    conn.execute("UPDATE users SET custom_title='' WHERE custom_title='泓聊居民'")
+
+
 def reconcile_successful_cosmetic_orders(conn: sqlite3.Connection, user_id: int | None = None) -> int:
     """Replay idempotent successful cosmetic orders.
 
@@ -2320,6 +2337,10 @@ def reconcile_successful_cosmetic_orders(conn: sqlite3.Connection, user_id: int 
     for row in rows:
         payload = market_item_payload(row)
         effect = str(payload.get("effect") or "").strip()
+        key = str(payload.get("key") or "").strip()
+        title = row["title"] if "title" in row.keys() else ""
+        if title in RETIRED_MARKET_ITEM_TITLES or key in RETIRED_COSMETIC_KEYS:
+            continue
         if effect in {"avatar_border_style", "username_badge", "profile_theme", "comment_theme", "custom_title"}:
             apply_direct_market_effect(conn, row["user_id"], normalize_market_category(row["category"]), row)
             count += 1

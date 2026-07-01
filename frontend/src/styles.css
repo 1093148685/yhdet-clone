@@ -419,9 +419,14 @@
 .profile-name-with-badge .username-badge, .user-card-name .username-badge { font-size: .72em; margin-left: 6px; }
 .user-profile-card.profile-theme-morning_blue { background: linear-gradient(135deg, #eff8ff 0%, #ffffff 52%, #f8fbff 100%); border-color: #bfdbfe; box-shadow: 0 18px 45px rgba(96,165,250,.13); }
 .user-profile-card.profile-theme-morning_blue .user-profile-body { background: radial-gradient(circle at 18% 20%, rgba(147,197,253,.28), transparent 30%), radial-gradient(circle at 80% 18%, rgba(186,230,253,.22), transparent 28%); border-radius: inherit; }
-.comment-card.comment-theme-soft_blue .topic-body { background: linear-gradient(135deg, rgba(239,248,255,.82), rgba(255,255,255,.96)); box-shadow: inset 2px 0 0 rgba(147,197,253,.42); }
-.reply-item.comment-theme-soft_blue { background: linear-gradient(135deg, #f0f8ff, #fff); }
-.comment-card.comment-theme-soft_blue + .comment-card.topic-post .topic-body { border-top-color: #dbeafe; }
+.user-profile-card.profile-theme-peach_blush { background: linear-gradient(135deg, #fff3f1 0%, #ffffff 54%, #fff8f5 100%); border-color: #fecaca; box-shadow: 0 18px 45px rgba(251,146,60,.11); }
+.user-profile-card.profile-theme-peach_blush .user-profile-body { background: radial-gradient(circle at 16% 22%, rgba(253,164,175,.22), transparent 30%), radial-gradient(circle at 82% 18%, rgba(254,215,170,.25), transparent 30%); border-radius: inherit; }
+.user-profile-card.profile-theme-mint_glass { background: linear-gradient(135deg, #eefdf8 0%, #ffffff 55%, #f4fffb 100%); border-color: #bbf7d0; box-shadow: 0 18px 45px rgba(52,211,153,.11); }
+.user-profile-card.profile-theme-mint_glass .user-profile-body { background: radial-gradient(circle at 15% 22%, rgba(134,239,172,.22), transparent 32%), radial-gradient(circle at 82% 20%, rgba(153,246,228,.24), transparent 30%); border-radius: inherit; }
+.user-profile-card.profile-theme-lavender_mist { background: linear-gradient(135deg, #f7f2ff 0%, #ffffff 53%, #fbf8ff 100%); border-color: #ddd6fe; box-shadow: 0 18px 45px rgba(167,139,250,.12); }
+.user-profile-card.profile-theme-lavender_mist .user-profile-body { background: radial-gradient(circle at 18% 20%, rgba(196,181,253,.24), transparent 30%), radial-gradient(circle at 78% 18%, rgba(233,213,255,.26), transparent 30%); border-radius: inherit; }
+.user-profile-card.profile-theme-sunset_gold { background: linear-gradient(135deg, #fff8e8 0%, #ffffff 54%, #fffaf0 100%); border-color: #fde68a; box-shadow: 0 18px 45px rgba(245,158,11,.11); }
+.user-profile-card.profile-theme-sunset_gold .user-profile-body { background: radial-gradient(circle at 16% 22%, rgba(251,191,36,.21), transparent 30%), radial-gradient(circle at 80% 18%, rgba(253,186,116,.22), transparent 30%); border-radius: inherit; }
 
         /* 搜索 */
         .search-container {
