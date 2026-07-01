@@ -252,10 +252,27 @@ function decodeOrderNote(text = '') {
     return obj.note || obj.address || Object.entries(obj).map(([k,v]) => `${k}: ${v}`).join(' / ')
   } catch { return text }
 }
-function OrderRow({ order }) {
+function orderItemTypeLabel(type = '') {
+  return { AVATAR_FRAME: '头像环', USERNAME_BADGE: '昵称图标', TITLE: '专属称号', THEME: '主页皮肤', COMMENT_THEME: '评论纸' }[type] || '装扮'
+}
+function OrderRow({ order, onChanged }) {
   const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
   const detail = decodeOrderNote(order.delivered_content || order.payload || order.shipping_info || '')
-  return <div className="post-item order-row"><button type="button" className="order-row-main" onClick={() => setOpen(!open)}><div><div className="post-title"><i className={`fas ${order.cover_icon || 'fa-gift'}`} /> {order.title || order.item_title}</div><div className="post-meta"><span>{order.cost_points || order.price} 泓币</span><span>{relativeTime(order.created_at)}</span><span>{orderStatusText(order.status)}</span></div></div><i className={`fas ${open ? 'fa-chevron-up' : 'fa-chevron-down'}`} /></button>{open && <div className="order-detail"><p><b>兑换时间：</b>{displayTime(order.created_at)}</p><p><b>处理状态：</b>{orderStatusText(order.status)}</p>{detail ? <p><b>兑换详情：</b>{detail}</p> : <p><b>兑换详情：</b>{order.status === 'PENDING' ? '等待管理员处理' : '暂无额外内容'}</p>}{order.fulfilled_at && <p><b>完成时间：</b>{displayTime(order.fulfilled_at)}</p>}</div>}</div>
+  async function toggleEquip(e) {
+    e.stopPropagation()
+    if (!order.equip_supported || order.status !== 'SUCCESS') return
+    setBusy(true)
+    try {
+      const path = order.is_equipped ? '/api/market/records/unequip' : '/api/market/records/equip'
+      const res = await api(path, { method: 'POST', body: JSON.stringify({ record_id: order.id, item_type: order.item_type }) })
+      if (res.user) syncStoredUser(res.user)
+      onChanged?.(res, order)
+      notify(res.message || (order.is_equipped ? '已恢复默认' : '已启用装扮'), 'success')
+    } catch (err) { notify(err.message, 'error') } finally { setBusy(false) }
+  }
+  const canEquip = order.equip_supported && order.status === 'SUCCESS'
+  return <div className={`post-item order-row ${order.is_equipped ? 'order-equipped' : ''}`}><div role="button" tabIndex={0} className="order-row-main" onClick={() => setOpen(!open)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') setOpen(v => !v) }}><div><div className="post-title"><i className={`fas ${order.cover_icon || 'fa-gift'}`} /> {order.title || order.item_title}{order.is_equipped && <span className="order-equipped-badge"><i className="fas fa-check" /> 使用中</span>}</div><div className="post-meta"><span>{order.cost_points || order.price} 泓币</span><span>{relativeTime(order.created_at)}</span><span>{orderStatusText(order.status)}</span>{order.item_type && <span>{orderItemTypeLabel(order.item_type)}</span>}</div></div><div className="order-row-actions">{canEquip && <button type="button" className={`btn btn-sm ${order.is_equipped ? 'btn-secondary' : 'btn-primary'} order-equip-btn`} onClick={toggleEquip}>{busy ? '处理中...' : order.is_equipped ? '恢复默认' : '立即启用'}</button>}<i className={`fas ${open ? 'fa-chevron-up' : 'fa-chevron-down'}`} /></div></div>{open && <div className="order-detail"><p><b>兑换时间：</b>{displayTime(order.created_at)}</p><p><b>处理状态：</b>{orderStatusText(order.status)}</p>{order.item_type && <p><b>装扮类型：</b>{orderItemTypeLabel(order.item_type)}{order.is_equipped ? ' · 当前使用中' : ''}</p>}{detail ? <p><b>兑换详情：</b>{detail}</p> : <p><b>兑换详情：</b>{order.status === 'PENDING' ? '等待管理员处理' : '暂无额外内容'}</p>}{order.fulfilled_at && <p><b>完成时间：</b>{displayTime(order.fulfilled_at)}</p>}</div>}</div>
 }
 function communityAge(days) {
   if (days === null || days === undefined || days === '') return ''
@@ -1255,6 +1272,19 @@ function UserPage({ id, me, setMe }) {
   if (!data) return <DetailSkeleton />
   const u = data.user
   const avatarDone = user => { setMe?.(user); setData(d => ({ ...d, user })); }
+  function handleOrderChanged(res, changedOrder) {
+    if (res.user) setMe?.(res.user)
+    setData(d => {
+      if (!d) return d
+      const nextUser = res.user ? { ...d.user, ...res.user } : d.user
+      const refreshed = Array.isArray(res.orders) ? res.orders : null
+      if (refreshed) {
+        const byId = new Map(refreshed.map(o => [o.id, o]))
+        return { ...d, user: nextUser, market_orders: (d.market_orders || []).map(o => byId.get(o.id) || (res.order?.id === o.id ? { ...o, ...res.order } : o)) }
+      }
+      return { ...d, user: nextUser, market_orders: (d.market_orders || []).map(o => o.id === changedOrder.id ? { ...o, ...(res.order || {}), is_equipped: !changedOrder.is_equipped } : (o.item_type && o.item_type === changedOrder.item_type ? { ...o, is_equipped: false } : o)) }
+    })
+  }
   async function morePosts() {
     if (!data.posts_has_more || loadingPosts) return
     setLoadingPosts(true)
@@ -1294,7 +1324,7 @@ function UserPage({ id, me, setMe }) {
       <div className="card-body user-profile-body"><div className="profile-head-row"><div className="avatar-wrap"><AvatarRing user={u} src={u.avatar} size={108} className="profile-avatar-ring" />{isMe && <AvatarUploader onDone={avatarDone} />}</div><div className="profile-title-block"><h2 className={`profile-name-with-badge ${usernameClass(u)}`}>{u.username}<UsernameBadge user={u} /></h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div></div><ProfileStats stats={data.profile_stats} /></div>
     </div>
     <div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-pen-nib" style={{ color: 'var(--primary)' }} /> TA 的帖子 <span className="mini-busy">{data.posts_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowPosts(!showPosts)}>{showPosts ? '折叠' : '展开'}</button></div>{showPosts && <div>{data.posts.length ? data.posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-feather-pointed" /><p>TA 还没有发表过帖子</p></div>}{data.posts_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={morePosts} disabled={loadingPosts}>{loadingPosts ? '加载中...' : '加载更多帖子'}</button></div>}</div>}</div>
-    {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.08s' }}><div className="card-header fold-head"><h3><i className="fas fa-receipt" style={{ color: '#f59e0b' }} /> 我的兑换记录 <span className="mini-busy">{data.market_orders_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data.market_orders?.length ? data.market_orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>{me ? '暂无兑换记录' : '登录后查看个人兑换记录'}</p></div>}{data.market_orders_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreOrders} disabled={loadingOrders}>{loadingOrders ? '加载中...' : '加载更多兑换记录'}</button></div>}</div>}</div>}
+    {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.08s' }}><div className="card-header fold-head"><h3><i className="fas fa-receipt" style={{ color: '#f59e0b' }} /> 我的兑换记录 <span className="mini-busy">{data.market_orders_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data.market_orders?.length ? data.market_orders.map(o => <OrderRow order={o} key={o.id} onChanged={handleOrderChanged} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>{me ? '暂无兑换记录' : '登录后查看个人兑换记录'}</p></div>}{data.market_orders_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreOrders} disabled={loadingOrders}>{loadingOrders ? '加载中...' : '加载更多兑换记录'}</button></div>}</div>}</div>}
     {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.1s' }}><div className="card-header fold-head"><h3><i className="fas fa-message" style={{ color: 'var(--secondary)' }} /> 被评论消息 {data.unread_notifications > 0 && <span className="bubble-badge red-badge inline-bubble">{data.unread_notifications > 99 ? '99+' : data.unread_notifications}</span>}</h3><div className="admin-actions">{data.unread_notifications > 0 && <button className="btn btn-sm btn-secondary" onClick={readAll}>全部已读</button>}<button className="btn btn-sm btn-secondary" onClick={() => setShowComments(!showComments)}>{showComments ? '折叠' : '展开'}</button></div></div>{showComments && <div>{data.received_comments?.length ? data.received_comments.map(c => <button className={`post-item notification-row ${!c.read ? 'is-unread' : ''}`} onClick={() => readOne(c)} key={c.id}><div className="reply-row"><img className="post-avatar" src={safeAvatar(c.avatar)} onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><b>{c.author} 评论了你的帖子</b><span>{relativeTime(c.time)}</span></div><div className="post-preview">《{c.post_title}》</div></div>{!c.read && <span className="unread-dot" />}</div></button>) : <div className="empty-state"><i className="fas fa-comment-slash" /><p>暂无被评论消息</p></div>}{data.received_comments_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreComments} disabled={loadingComments}>{loadingComments ? '加载中...' : '加载更多评论'}</button></div>}</div>}</div>}
     {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.12s' }}><div className="card-header fold-head"><h3><i className="fas fa-paper-plane" style={{ color: '#16a34a' }} /> 我发出的评论 <span className="mini-busy">{data.sent_comments_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowSentComments(!showSentComments)}>{showSentComments ? '折叠' : '展开'}</button></div>{showSentComments && <div>{data.sent_comments?.length ? data.sent_comments.map(c => <a className="post-item notification-row sent-comment-row" href={`/post/${c.post_id}#comment-${c.id}`} key={c.id}><div className="reply-row"><img className="post-avatar" src={safeAvatar(c.owner_avatar)} onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><b>回复了 {c.owner_name} 的帖子</b><span>{relativeTime(c.time)}</span></div><div className="post-preview">《{c.post_title}》</div><div className="sent-comment-content">{c.content}</div></div></div></a>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>还没有发出过评论</p></div>}{data.sent_comments_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreSentComments} disabled={loadingSentComments}>{loadingSentComments ? '加载中...' : '加载更多发出的评论'}</button></div>}</div>}</div>}
     <div className="back-home"><a className="btn btn-secondary" href="/"><i className="fas fa-arrow-left" /> 返回首页</a></div>

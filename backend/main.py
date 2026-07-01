@@ -194,7 +194,7 @@ def market_item_fulfillment_method(item: sqlite3.Row | dict[str, Any]) -> str:
 
 
 def market_order_to_dict(o: sqlite3.Row) -> dict[str, Any]:
-    return {
+    data = {
         "id": o["id"],
         "item_id": o["item_id"],
         "title": o["title"] if "title" in o.keys() else o["item_title"],
@@ -210,6 +210,69 @@ def market_order_to_dict(o: sqlite3.Row) -> dict[str, Any]:
         "fulfilled_at": o["fulfilled_at"],
         "cover_icon": o["cover_icon"] if "cover_icon" in o.keys() else "fa-gift",
     }
+    if "payload_json" in o.keys():
+        data["payload_json"] = o["payload_json"] or "{}"
+        data.update(market_record_equip_state(o))
+    return data
+
+
+def market_record_effect(o: sqlite3.Row | dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    raw = (o.get("payload_json") if isinstance(o, dict) else o["payload_json"] if "payload_json" in o.keys() else "") or "{}"
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = {}
+    effect = str(payload.get("effect") or "").strip()
+    if effect in {"avatar_border_style", "username_badge", "custom_title", "profile_theme", "comment_theme"}:
+        return effect, payload
+    return "", payload
+
+
+def market_record_item_type(effect: str) -> str:
+    return {
+        "avatar_border_style": "AVATAR_FRAME",
+        "username_badge": "USERNAME_BADGE",
+        "custom_title": "TITLE",
+        "profile_theme": "THEME",
+        "comment_theme": "COMMENT_THEME",
+    }.get(effect, "")
+
+
+def market_record_equip_state(o: sqlite3.Row | dict[str, Any], user_row: sqlite3.Row | None = None) -> dict[str, Any]:
+    effect, payload = market_record_effect(o)
+    equip_value = ""
+    if effect == "avatar_border_style":
+        equip_value = str(payload.get("style") or "").strip()
+    elif effect == "username_badge":
+        equip_value = str(payload.get("label") or "").strip()[:4]
+    elif effect == "custom_title":
+        title = o.get("title") if isinstance(o, dict) else (o["title"] if "title" in o.keys() else o["item_title"] if "item_title" in o.keys() else "")
+        equip_value = str(payload.get("title") or title or "").strip()[:24]
+    elif effect in {"profile_theme", "comment_theme"}:
+        equip_value = str(payload.get("key") or "").strip()[:40]
+    is_equipped = False
+    if effect and equip_value and user_row is not None:
+        current = (user_row[effect] if effect in user_row.keys() else "") or ""
+        if effect == "avatar_border_style":
+            current = current or DEFAULT_AVATAR_BORDER_STYLE
+        is_equipped = current == equip_value
+    return {
+        "equip_supported": bool(effect and equip_value),
+        "equip_effect": effect,
+        "item_type": market_record_item_type(effect),
+        "equip_value": equip_value,
+        "is_equipped": is_equipped,
+    }
+
+
+def market_orders_to_dicts(conn: sqlite3.Connection, rows: list[sqlite3.Row], user_id: int) -> list[dict[str, Any]]:
+    user_row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    items = []
+    for row in rows:
+        data = market_order_to_dict(row)
+        data.update(market_record_equip_state(row, user_row))
+        items.append(data)
+    return items
 
 
 def human_duration(seconds: int) -> str:
@@ -901,16 +964,22 @@ def fetch_comment_dict(conn: sqlite3.Connection, post_id: int, comment_id: int, 
     return comment_row_to_dict(row, viewer) if row else None
 
 
-def fetch_market_order_dict(conn: sqlite3.Connection, order_id: int) -> dict[str, Any] | None:
+def fetch_market_order_dict(conn: sqlite3.Connection, order_id: int, user_id: int | None = None) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
+        SELECT o.*, mi.title, mi.cover_icon, mi.payload_json FROM market_orders o
         LEFT JOIN market_items mi ON mi.id=o.item_id
         WHERE o.id=?
         """,
         (order_id,),
     ).fetchone()
-    return market_order_to_dict(row) if row else None
+    if not row:
+        return None
+    data = market_order_to_dict(row)
+    if user_id is not None:
+        user_row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        data.update(market_record_equip_state(row, user_row))
+    return data
 
 
 def fetch_admin_market_order_dict(conn: sqlite3.Connection, order_id: int) -> dict[str, Any] | None:
@@ -1289,6 +1358,11 @@ class MarketExchangeIn(BaseModel):
 
 class MarketBorderExchangeIn(BaseModel):
     item_id: int
+
+
+class MarketRecordEquipIn(BaseModel):
+    record_id: int
+    item_type: str | None = Field(default='', max_length=40)
 
 
 class MarketAuditIn(BaseModel):
@@ -2096,7 +2170,7 @@ def user_detail(user_id: int, posts_page: int = 1, comments_page: int = 1, sent_
             unread_notifications = conn.execute("SELECT COUNT(*) FROM comment_notifications WHERE user_id=? AND COALESCE(read_at,'')=''", (user_id,)).fetchone()[0]
             order_rows = conn.execute(
                 """
-                SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
+                SELECT o.*, mi.title, mi.cover_icon, mi.payload_json FROM market_orders o
                 LEFT JOIN market_items mi ON mi.id=o.item_id
                 WHERE o.user_id=? ORDER BY o.id DESC LIMIT ? OFFSET ?
                 """,
@@ -2119,7 +2193,7 @@ def user_detail(user_id: int, posts_page: int = 1, comments_page: int = 1, sent_
         "posts_has_more": posts_page * page_size < post_total,
         "received_comments": [{"id": c["id"], "notification_id": c["notification_id"], "read": bool(c["notification_read_at"]) if c["notification_id"] else True, "post_id": c["post_id"], "post_title": c["post_title"], "user_id": c["user_id"], "author": c["actor_name"], "avatar": c["actor_avatar"] or DEFAULT_AVATAR, "content": c["content"], "time": c["created_at"]} for c in comment_rows],
         "sent_comments": [{"id": c["id"], "post_id": c["post_id"], "post_title": c["post_title"], "owner_name": c["owner_name"], "owner_avatar": c["owner_avatar"] or DEFAULT_AVATAR, "content": c["content"], "time": c["created_at"]} for c in sent_comment_rows],
-        "market_orders": [market_order_to_dict(o) for o in order_rows],
+        "market_orders": market_orders_to_dicts(conn, list(order_rows), user_id) if is_owner else [],
         "market_orders_total": order_total,
         "market_orders_has_more": orders_page * 5 < order_total,
         "unread_notifications": unread_notifications,
@@ -2369,19 +2443,23 @@ def market_home(authorization: str | None = Header(default=None)):
                 balance = refresh_user_points(conn, user["id"])
             orders = conn.execute(
                 """
-                SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
+                SELECT o.*, mi.title, mi.cover_icon, mi.payload_json FROM market_orders o
                 JOIN market_items mi ON mi.id=o.item_id
                 WHERE o.user_id=? ORDER BY o.id DESC LIMIT 8
                 """,
                 (user["id"],),
             ).fetchall()
-    return {
-        "balance": int(balance or 0),
-        "items": [{**dict(i), "fulfillment_method": market_item_fulfillment_method(i)} for i in items],
-        "orders": [market_order_to_dict(o) for o in orders],
-        "rules": ["发布帖子 +12 泓币", "发表评论 +3 泓币", "卡密自动发放，实物/赞助进入待处理"],
-        "guest": not bool(user),
-    }
+            order_dicts = market_orders_to_dicts(conn, list(orders), user["id"])
+        else:
+            order_dicts = []
+        result = {
+            "balance": int(balance or 0),
+            "items": [{**dict(i), "fulfillment_method": market_item_fulfillment_method(i)} for i in items],
+            "orders": order_dicts,
+            "rules": ["发布帖子 +12 泓币", "发表评论 +3 泓币", "卡密自动发放，实物/赞助进入待处理"],
+            "guest": not bool(user),
+        }
+    return result
 
 
 @app.get("/api/market/orders")
@@ -2394,13 +2472,112 @@ def market_orders(page: int = 1, page_size: int = 5, authorization: str | None =
         total = conn.execute("SELECT COUNT(*) FROM market_orders WHERE user_id=?", (user["id"],)).fetchone()[0]
         rows = conn.execute(
             """
-            SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
+            SELECT o.*, mi.title, mi.cover_icon, mi.payload_json FROM market_orders o
             LEFT JOIN market_items mi ON mi.id=o.item_id
             WHERE o.user_id=? ORDER BY o.id DESC LIMIT ? OFFSET ?
             """,
             (user["id"], page_size, offset_value),
         ).fetchall()
-    return {"items": [market_order_to_dict(o) for o in rows], "total": total, "page": page, "page_size": page_size, "has_more": offset_value + len(rows) < total}
+    return {"items": market_orders_to_dicts(conn, list(rows), user["id"]), "total": total, "page": page, "page_size": page_size, "has_more": offset_value + len(rows) < total}
+
+
+@app.post("/api/market/records/equip")
+def market_record_equip(payload: MarketRecordEquipIn, authorization: str | None = Header(default=None)):
+    user = require_user(current_user(authorization))
+    try:
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    """
+                    SELECT o.*, mi.title, mi.cover_icon, mi.payload_json, mi.category AS item_category
+                    FROM market_orders o
+                    JOIN market_items mi ON mi.id=o.item_id
+                    WHERE o.id=? AND o.user_id=?
+                    """,
+                    (payload.record_id, user["id"]),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="兑换记录不存在")
+                if row["status"] != OrderStatus.SUCCESS.value:
+                    raise HTTPException(status_code=400, detail="只有已完成的兑换记录可以启用")
+                effect, effect_payload = market_record_effect(row)
+                state = market_record_equip_state(row)
+                if not state["equip_supported"]:
+                    raise HTTPException(status_code=400, detail="该商品不支持装扮切换")
+                key = str(effect_payload.get("key") or "").strip()
+                title = row["title"] if "title" in row.keys() else ""
+                if title in RETIRED_MARKET_ITEM_TITLES or key in RETIRED_COSMETIC_KEYS:
+                    raise HTTPException(status_code=400, detail="该装扮已下架，不能继续启用")
+                category = normalize_market_category(row["item_category"] if "item_category" in row.keys() else row["category"])
+                delivered = apply_direct_market_effect(conn, user["id"], category, row)
+                conn.execute("UPDATE market_orders SET delivered_content=?, fulfilled_at=COALESCE(NULLIF(fulfilled_at,''), ?) WHERE id=?", (delivered, now(), row["id"]))
+                refreshed = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+                rows = conn.execute(
+                    """
+                    SELECT o.*, mi.title, mi.cover_icon, mi.payload_json FROM market_orders o
+                    LEFT JOIN market_items mi ON mi.id=o.item_id
+                    WHERE o.user_id=? ORDER BY o.id DESC LIMIT 5
+                    """,
+                    (user["id"],),
+                ).fetchall()
+                order = fetch_market_order_dict(conn, row["id"], user["id"])
+                orders = market_orders_to_dicts(conn, list(rows), user["id"])
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            raise HTTPException(status_code=409, detail="系统繁忙，请稍后重试")
+        raise
+    return {"ok": True, "message": "已启用装扮", "order": order, "orders": orders, "user": public_user(refreshed)}
+
+
+@app.post("/api/market/records/unequip")
+def market_record_unequip(payload: MarketRecordEquipIn, authorization: str | None = Header(default=None)):
+    user = require_user(current_user(authorization))
+    try:
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    """
+                    SELECT o.*, mi.title, mi.cover_icon, mi.payload_json
+                    FROM market_orders o
+                    JOIN market_items mi ON mi.id=o.item_id
+                    WHERE o.id=? AND o.user_id=?
+                    """,
+                    (payload.record_id, user["id"]),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="兑换记录不存在")
+                effect, _payload = market_record_effect(row)
+                state = market_record_equip_state(row)
+                if not state["equip_supported"]:
+                    raise HTTPException(status_code=400, detail="该商品不支持恢复默认")
+                default_value = DEFAULT_AVATAR_BORDER_STYLE if effect == "avatar_border_style" else ""
+                conn.execute(f"UPDATE users SET {effect}=? WHERE id=?", (default_value, user["id"]))
+                refreshed = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+                rows = conn.execute(
+                    """
+                    SELECT o.*, mi.title, mi.cover_icon, mi.payload_json FROM market_orders o
+                    LEFT JOIN market_items mi ON mi.id=o.item_id
+                    WHERE o.user_id=? ORDER BY o.id DESC LIMIT 5
+                    """,
+                    (user["id"],),
+                ).fetchall()
+                order = fetch_market_order_dict(conn, row["id"], user["id"])
+                orders = market_orders_to_dicts(conn, list(rows), user["id"])
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            raise HTTPException(status_code=409, detail="系统繁忙，请稍后重试")
+        raise
+    return {"ok": True, "message": "已恢复默认", "order": order, "orders": orders, "user": public_user(refreshed)}
 
 
 @app.post("/api/market/exchange")
