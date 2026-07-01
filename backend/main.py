@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import hashlib
 import secrets
 import os
@@ -129,9 +130,14 @@ class FulfillmentMethod(str, Enum):
 
 class OrderStatus(str, Enum):
     PENDING = "PENDING"
+    PENDING_AUDIT = "PENDING_AUDIT"
     SUCCESS = "SUCCESS"
+    REJECTED = "REJECTED"
     FAILED = "FAILED"
 
+
+AUDIT_MARKET_TITLES = {"改名卡": "rename", "头衔申请券": "title", "自定义头衔卡": "title"}
+USERNAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
 
 DIRECT_EFFECT_CATEGORIES = {ProductCategory.MEMBER_BENEFIT.value, ProductCategory.THEME_DRESSUP.value, ProductCategory.RARE_PERK.value}
 CARD_KEY_CATEGORIES = {ProductCategory.GIFT_GENERAL.value, ProductCategory.COUPON_TICKET.value, ProductCategory.GAME_ITEM.value}
@@ -160,7 +166,7 @@ def fulfillment_method(category: str | None) -> str:
 def market_item_fulfillment_method(item: sqlite3.Row | dict[str, Any]) -> str:
     category = normalize_market_category(item["category"] if isinstance(item, dict) else item["category"])
     title = (item.get("title") if isinstance(item, dict) else item["title"] if "title" in item.keys() else "") or ""
-    if category == ProductCategory.MEMBER_BENEFIT.value and title in {"改名卡", "头衔申请券"}:
+    if category == ProductCategory.MEMBER_BENEFIT.value and title in AUDIT_MARKET_TITLES:
         return FulfillmentMethod.MANUAL_PROCESS.value
     return fulfillment_method(category)
 
@@ -176,6 +182,7 @@ def market_order_to_dict(o: sqlite3.Row) -> dict[str, Any]:
         "status": o["status"],
         "category": o["category"],
         "shipping_info": o["shipping_info"],
+        "payload": o["payload"] if "payload" in o.keys() else "",
         "delivered_content": o["delivered_content"],
         "created_at": o["created_at"],
         "fulfilled_at": o["fulfilled_at"],
@@ -461,6 +468,7 @@ def init_db() -> None:
                 cost_points INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'SUCCESS',
                 shipping_info TEXT NOT NULL DEFAULT '',
+                payload TEXT NOT NULL DEFAULT '',
                 delivered_content TEXT NOT NULL DEFAULT '',
                 fulfilled_at TEXT DEFAULT '',
                 fulfilled_by INTEGER,
@@ -539,6 +547,7 @@ def init_db() -> None:
             "ALTER TABLE market_orders ADD COLUMN category TEXT NOT NULL DEFAULT 'GIFT_GENERAL'",
             "ALTER TABLE market_orders ADD COLUMN cost_points INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE market_orders ADD COLUMN shipping_info TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE market_orders ADD COLUMN payload TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE market_orders ADD COLUMN delivered_content TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE market_orders ADD COLUMN fulfilled_at TEXT DEFAULT ''",
             "ALTER TABLE market_orders ADD COLUMN fulfilled_by INTEGER",
@@ -1012,6 +1021,16 @@ class MarketBuyIn(BaseModel):
     shipping_phone: str | None = Field(default='', max_length=40)
     shipping_address: str | None = Field(default='', max_length=500)
     request_note: str | None = Field(default='', max_length=500)
+
+
+class MarketExchangeIn(BaseModel):
+    item_id: int
+    value: str = Field(min_length=1, max_length=64)
+
+
+class MarketAuditIn(BaseModel):
+    approved: bool
+    reject_reason: str | None = Field(default='', max_length=500)
 
 
 class MarketItemIn(BaseModel):
@@ -1734,6 +1753,38 @@ def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category:
     raise HTTPException(status_code=400, detail="不支持的即时生效商品")
 
 
+def virtual_audit_type(item: sqlite3.Row | dict[str, Any]) -> str | None:
+    title = (item.get("title") if isinstance(item, dict) else item["title"] if "title" in item.keys() else "") or ""
+    payload_raw = (item.get("payload_json") if isinstance(item, dict) else item["payload_json"] if "payload_json" in item.keys() else "") or "{}"
+    try:
+        payload = json.loads(payload_raw)
+        if payload.get("request_type") == "rename":
+            return "rename"
+        if payload.get("request_type") in {"custom_title", "title"}:
+            return "title"
+    except Exception:
+        pass
+    return AUDIT_MARKET_TITLES.get(title)
+
+
+def validate_virtual_exchange(conn: sqlite3.Connection, user_id: int, item: sqlite3.Row, value: str) -> tuple[str, str]:
+    exchange_type = virtual_audit_type(item)
+    if exchange_type not in {"rename", "title"}:
+        raise HTTPException(status_code=400, detail="该商品不是虚拟权益审核商品")
+    cleaned = (value or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="请填写申请内容")
+    if len(cleaned) > 32:
+        raise HTTPException(status_code=400, detail="申请内容不能超过 32 个字符")
+    if exchange_type == "rename":
+        if not USERNAME_RE.match(cleaned):
+            raise HTTPException(status_code=400, detail="用户名必须以字母开头，且只能包含字母、数字和下划线！")
+        exists = conn.execute("SELECT 1 FROM users WHERE username=? AND id<>? AND COALESCE(deleted_at,'')=''", (cleaned, user_id)).fetchone()
+        if exists:
+            raise HTTPException(status_code=400, detail="该用户名已被占用")
+    return exchange_type, cleaned
+
+
 def shipping_text(payload: MarketBuyIn) -> str:
     name = (payload.shipping_name or "").strip()
     phone = (payload.shipping_phone or "").strip()
@@ -1789,6 +1840,57 @@ def market_orders(page: int = 1, page_size: int = 5, authorization: str | None =
             (user["id"], page_size, offset_value),
         ).fetchall()
     return {"items": [market_order_to_dict(o) for o in rows], "total": total, "page": page, "page_size": page_size, "has_more": offset_value + len(rows) < total}
+
+
+@app.post("/api/market/exchange")
+def market_exchange(payload: MarketExchangeIn, authorization: str | None = Header(default=None)):
+    user = require_user(current_user(authorization))
+    order_id = None
+    new_balance = 0
+    exchange_payload = {}
+    try:
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                item = conn.execute("SELECT * FROM market_items WHERE id=? AND enabled=1", (payload.item_id,)).fetchone()
+                if not item:
+                    raise HTTPException(status_code=404, detail="商品不存在或已下架")
+                category = normalize_market_category(item["category"])
+                exchange_type, cleaned = validate_virtual_exchange(conn, user["id"], item, payload.value)
+                price = int(item["price"] or 0)
+                if price < 0:
+                    raise HTTPException(status_code=400, detail="商品价格异常")
+                balance = refresh_user_points(conn, user["id"])
+                if balance < price:
+                    raise HTTPException(status_code=400, detail="泓币不足")
+                if int(item["stock"] or 0) == 0:
+                    raise HTTPException(status_code=400, detail="商品已售罄")
+                stock_cur = conn.execute("UPDATE market_items SET stock=CASE WHEN stock>0 THEN stock-1 ELSE stock END, updated_at=? WHERE id=? AND enabled=1 AND stock<>0", (now(), item["id"]))
+                if stock_cur.rowcount == 0:
+                    raise HTTPException(status_code=400, detail="商品库存不足")
+                exchange_payload = {"type": exchange_type, "value": cleaned, "item_title": item["title"]}
+                payload_text = json.dumps(exchange_payload, ensure_ascii=False)
+                cur = conn.execute(
+                    "INSERT INTO market_orders(user_id,item_id,price,category,cost_points,status,shipping_info,payload,delivered_content,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (user["id"], item["id"], price, category, price, OrderStatus.PENDING_AUDIT.value, payload_text, payload_text, "", now()),
+                )
+                order_id = cur.lastrowid
+                points_cur = conn.execute("UPDATE user_points SET available_points=available_points-?, updated_at=? WHERE user_id=? AND available_points>=?", (price, now(), user["id"], price))
+                if points_cur.rowcount == 0:
+                    raise HTTPException(status_code=400, detail="泓币不足")
+                conn.execute("INSERT INTO point_ledger(user_id,delta,reason,ref_type,ref_id,created_at) VALUES(?,?,?,?,?,?)", (user["id"], -price, "purchase_item", "market_order", order_id, now()))
+                new_balance = refresh_user_points(conn, user["id"])
+                if new_balance < 0:
+                    raise HTTPException(status_code=500, detail="积分账目异常，已回滚")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            raise HTTPException(status_code=409, detail="系统繁忙，请稍后重试")
+        raise
+    return {"ok": True, "order_id": order_id, "status": OrderStatus.PENDING_AUDIT.value, "balance": int(new_balance or 0), "payload": exchange_payload}
 
 
 @app.post("/api/market/buy")
@@ -1890,7 +1992,7 @@ def admin_market(authorization: str | None = Header(default=None)):
         ).fetchall()
     return {
         "items": [{**dict(i), "fulfillment_method": market_item_fulfillment_method(i), "card_key_available": conn.execute("SELECT COUNT(*) FROM product_card_keys WHERE product_id=? AND is_used=0", (i["id"],)).fetchone()[0], "orders_count": conn.execute("SELECT COUNT(*) FROM market_orders WHERE item_id=?", (i["id"],)).fetchone()[0]} for i in items],
-        "orders": [{"id": o["id"], "username": o["username"], "item_title": o["item_title"], "price": o["price"], "cost_points": o["cost_points"], "category": o["category"], "status": o["status"], "shipping_info": o["shipping_info"], "delivered_content": o["delivered_content"], "created_at": o["created_at"], "fulfilled_at": o["fulfilled_at"]} for o in orders],
+        "orders": [{"id": o["id"], "username": o["username"], "item_title": o["item_title"], "price": o["price"], "cost_points": o["cost_points"], "category": o["category"], "status": o["status"], "shipping_info": o["shipping_info"], "payload": o["payload"] if "payload" in o.keys() else "", "delivered_content": o["delivered_content"], "created_at": o["created_at"], "fulfilled_at": o["fulfilled_at"]} for o in orders],
         "ledgers": [{"id": l["id"], "username": l["username"], "delta": l["delta"], "reason": l["reason"], "ref_type": l["ref_type"], "ref_id": l["ref_id"], "created_at": l["created_at"]} for l in ledgers],
         "categories": [{"value": c, "method": CATEGORY_METHOD[c]} for c in sorted(ALL_PRODUCT_CATEGORIES)],
     }
@@ -1993,6 +2095,73 @@ def admin_add_market_keys(payload: MarketKeysIn, authorization: str | None = Hea
             except sqlite3.IntegrityError:
                 pass
     return {"ok": True, "inserted": inserted, "ignored": len(keys) - inserted}
+
+
+@app.put("/api/admin/market/audit/{order_id}")
+def admin_audit_market_order(order_id: int, payload: MarketAuditIn, authorization: str | None = Header(default=None)):
+    admin = require_admin(current_user(authorization))
+    try:
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                order = conn.execute(
+                    """
+                    SELECT o.*, mi.title AS item_title, u.username AS current_username
+                    FROM market_orders o
+                    JOIN market_items mi ON mi.id=o.item_id
+                    JOIN users u ON u.id=o.user_id
+                    WHERE o.id=?
+                    """,
+                    (order_id,),
+                ).fetchone()
+                if not order:
+                    raise HTTPException(status_code=404, detail="订单不存在")
+                if order["status"] != OrderStatus.PENDING_AUDIT.value:
+                    raise HTTPException(status_code=400, detail="只有待审核订单可以审核")
+                try:
+                    data = json.loads(order["payload"] or order["shipping_info"] or "{}")
+                except Exception:
+                    raise HTTPException(status_code=400, detail="订单申请数据损坏，无法审核")
+                req_type = data.get("type")
+                value = str(data.get("value") or "").strip()
+                if req_type not in {"rename", "title"} or not value:
+                    raise HTTPException(status_code=400, detail="订单申请数据不完整")
+                if payload.approved:
+                    if req_type == "rename":
+                        if not USERNAME_RE.match(value):
+                            raise HTTPException(status_code=400, detail="用户名必须以字母开头，且只能包含字母、数字和下划线！")
+                        exists = conn.execute("SELECT 1 FROM users WHERE username=? AND id<>? AND COALESCE(deleted_at,'')=''", (value, order["user_id"])).fetchone()
+                        if exists:
+                            raise HTTPException(status_code=400, detail="该用户名已被占用，无法通过")
+                        conn.execute("UPDATE users SET username=? WHERE id=?", (value, order["user_id"]))
+                        result = f"已通过改名申请：{order['current_username']} → {value}"
+                    else:
+                        conn.execute("UPDATE users SET custom_title=? WHERE id=?", (value[:32], order["user_id"]))
+                        result = f"已通过头衔申请：{value[:32]}"
+                    conn.execute("UPDATE market_orders SET status=?, delivered_content=?, fulfilled_at=?, fulfilled_by=? WHERE id=?", (OrderStatus.SUCCESS.value, result, now(), admin["id"], order_id))
+                    conn.commit()
+                    return {"ok": True, "status": OrderStatus.SUCCESS.value, "message": result}
+                reason = (payload.reject_reason or "管理员拒绝该申请").strip()[:500]
+                refund = int(order["cost_points"] or order["price"] or 0)
+                if refund > 0:
+                    try:
+                        conn.execute("INSERT INTO point_ledger(user_id,delta,reason,ref_type,ref_id,created_at) VALUES(?,?,?,?,?,?)", (order["user_id"], refund, "refund_market_order", "market_order", order_id, now()))
+                    except sqlite3.IntegrityError:
+                        raise HTTPException(status_code=409, detail="该订单已退款，请勿重复操作")
+                    conn.execute("UPDATE user_points SET available_points=available_points+?, total_earned=total_earned+?, updated_at=? WHERE user_id=?", (refund, refund, now(), order["user_id"]))
+                conn.execute("UPDATE market_items SET stock=CASE WHEN stock>=0 THEN stock+1 ELSE stock END, updated_at=? WHERE id=?", (now(), order["item_id"]))
+                result = f"审核拒绝：{reason}；已退回 {refund} 泓币"
+                conn.execute("UPDATE market_orders SET status=?, delivered_content=?, fulfilled_at=?, fulfilled_by=? WHERE id=?", (OrderStatus.REJECTED.value, result, now(), admin["id"], order_id))
+                refresh_user_points(conn, order["user_id"])
+                conn.commit()
+                return {"ok": True, "status": OrderStatus.REJECTED.value, "message": result, "refund": refund}
+            except Exception:
+                conn.rollback()
+                raise
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            raise HTTPException(status_code=409, detail="系统繁忙，请稍后重试")
+        raise
 
 
 @app.put("/api/admin/market/orders/{order_id}/fulfill")

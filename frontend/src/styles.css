@@ -603,6 +603,22 @@
         .market-card-body { padding: 16px; display: grid; gap: 10px; }
         .market-card-body h3 { font-size: 1.05rem; color: #111827; }
         .market-card-body p { min-height: 42px; color: #64748b; font-size: .9rem; line-height: 1.55; }
+        .exchange-mask { position: fixed; inset: 0; z-index: 12000; display: flex; align-items: center; justify-content: center; padding: 18px; background: rgba(15,23,42,.42); backdrop-filter: blur(8px); animation: exchangeFade .16s ease both; }
+        .exchange-modal { width: min(440px, 94vw); background: #fff; border: 1px solid #e5e7eb; border-radius: 22px; padding: 24px; box-shadow: 0 24px 80px rgba(15,23,42,.24); position: relative; transform-origin: center; animation: exchangeDeform .22s cubic-bezier(.2,.8,.2,1) both; }
+        .exchange-modal h3 { margin: 6px 0 8px; color: #0f172a; font-size: 1.2rem; }
+        .exchange-modal p { color: #64748b; line-height: 1.65; margin-bottom: 16px; }
+        .exchange-icon { width: 58px; height: 58px; border-radius: 18px; display: grid; place-items: center; background: linear-gradient(135deg,#fff7ed,#dbeafe); color: #d97706; font-size: 1.35rem; box-shadow: inset 0 0 0 1px rgba(251,191,36,.35); }
+        .exchange-step-done .exchange-icon { background: linear-gradient(135deg,#dcfce7,#eff6ff); color: #16a34a; }
+        .exchange-close { position: absolute; top: 14px; right: 14px; width: 34px; height: 34px; border: 0; border-radius: 999px; background: #f8fafc; color: #64748b; cursor: pointer; }
+        .exchange-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+        .exchange-field { display: grid; gap: 7px; margin-top: 12px; }
+        .exchange-field span { font-size: .84rem; color: #334155; font-weight: 700; }
+        .field-hint { color: #64748b; display: block; margin-top: 7px; }
+        .field-error { color: #dc2626; display: block; margin-top: 7px; font-weight: 700; }
+        .input-error { border-color: #ef4444 !important; box-shadow: 0 0 0 3px rgba(239,68,68,.12); }
+        .compact-alert { padding: 8px 10px; margin-top: 10px; }
+        @keyframes exchangeFade { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes exchangeDeform { from { opacity: 0; transform: translateY(12px) scale(.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
         .market-meta { display: flex; align-items: center; justify-content: space-between; color: #64748b; font-size: .86rem; }
         .market-meta b { color: #b45309; font-size: 1rem; }
         .loading-card {

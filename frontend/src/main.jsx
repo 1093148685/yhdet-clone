@@ -199,14 +199,18 @@ function displayDate(s = '') {
   const pad = n => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
-function orderStatusText(s = '') { return s === 'SUCCESS' ? '已完成' : s === 'PENDING' ? '待处理' : s === 'FAILED' ? '失败' : s }
+function orderStatusText(s = '') { return s === 'SUCCESS' ? '已完成' : s === 'PENDING' ? '待处理' : s === 'PENDING_AUDIT' ? '待审核' : s === 'REJECTED' ? '已拒绝/已退款' : s === 'FAILED' ? '失败' : s }
 function decodeOrderNote(text = '') {
   if (!text) return ''
-  try { const obj = JSON.parse(text); return obj.note || obj.address || Object.entries(obj).map(([k,v]) => `${k}: ${v}`).join(' / ') } catch { return text }
+  try {
+    const obj = JSON.parse(text)
+    if (obj.type && obj.value) return `${obj.type === 'rename' ? '申请新用户名' : obj.type === 'title' ? '申请头衔' : obj.type}: ${obj.value}`
+    return obj.note || obj.address || Object.entries(obj).map(([k,v]) => `${k}: ${v}`).join(' / ')
+  } catch { return text }
 }
 function OrderRow({ order }) {
   const [open, setOpen] = useState(false)
-  const detail = decodeOrderNote(order.delivered_content || order.shipping_info || '')
+  const detail = decodeOrderNote(order.delivered_content || order.payload || order.shipping_info || '')
   return <div className="post-item order-row"><button type="button" className="order-row-main" onClick={() => setOpen(!open)}><div><div className="post-title"><i className={`fas ${order.cover_icon || 'fa-gift'}`} /> {order.title || order.item_title}</div><div className="post-meta"><span>{order.cost_points || order.price} 泓币</span><span>{relativeTime(order.created_at)}</span><span>{orderStatusText(order.status)}</span></div></div><i className={`fas ${open ? 'fa-chevron-up' : 'fa-chevron-down'}`} /></button>{open && <div className="order-detail"><p><b>兑换时间：</b>{displayTime(order.created_at)}</p><p><b>处理状态：</b>{orderStatusText(order.status)}</p>{detail ? <p><b>兑换详情：</b>{detail}</p> : <p><b>兑换详情：</b>{order.status === 'PENDING' ? '等待管理员处理' : '暂无额外内容'}</p>}{order.fulfilled_at && <p><b>完成时间：</b>{displayTime(order.fulfilled_at)}</p>}</div>}</div>
 }
 function communityAge(days) {
@@ -1326,6 +1330,12 @@ function AdminMarket({ data, draft, setDraft, run }) {
     if (!text?.trim()) return
     run(() => api(`/api/admin/market/orders/${o.id}/fulfill`, { method:'PUT', body: JSON.stringify({ delivered_content:text.trim() }) }))
   }
+  const audit = (o, approved) => {
+    const reject_reason = approved ? '' : prompt(`拒绝订单 #${o.id} 的原因：`, '申请内容不符合社区规范')
+    if (!approved && !reject_reason?.trim()) return
+    run(() => api(`/api/admin/market/audit/${o.id}`, { method:'PUT', body: JSON.stringify({ approved, reject_reason: reject_reason || '' }) }))
+  }
+  const adminOrderMeta = o => `${o.cost_points || o.price} 泓币 · ${orderStatusText(o.status)} · ${displayTime(o.created_at)}`
   return <div className="admin-card"><h3>泓市场后台</h3>
     <div className="admin-create market-admin-create">
       {directCats.has(item.category) ? <select className="form-input" value={selectedSystemProduct?.title || item.title || ''} onChange={e => setSystemProduct(e.target.value)}>{currentSystemProducts.map(p => <option key={p.title} value={p.title}>{p.title}</option>)}</select> : <input className="form-input" placeholder="商品名" value={item.title || ''} onChange={e => setDraft({ ...draft, marketItem: { ...item, title:e.target.value, cover_icon: categoryIcons[item.category] || item.cover_icon || 'fa-gift' } })} />}
@@ -1339,7 +1349,7 @@ function AdminMarket({ data, draft, setDraft, run }) {
     <h3>商品列表</h3>
     {items.map(x => <div className="admin-row" key={x.id}><div><b><i className={`fas ${x.cover_icon || 'fa-gift'}`} /> {x.title}</b><p>{x.price} 泓币 · {x.stock < 0 ? '不限库存' : `库存 ${x.stock}`} · {x.enabled ? '上架中' : '已下架'} · {x.fulfillment_method}</p><small>{x.description}{cardCats.has(x.category) ? ` · 可用卡密 ${x.card_key_available || 0}` : ''}{x.orders_count ? ` · 兑换记录 ${x.orders_count} 条` : ''}</small></div><div className="admin-actions"><button className="btn btn-sm btn-secondary" onClick={() => edit(x)}>编辑</button>{cardCats.has(x.category) && <button className="btn btn-sm btn-secondary" onClick={() => addKeys(x)}>导入卡密</button>}{x.enabled ? <button className="btn btn-sm btn-secondary" onClick={() => setEnabled(x, false)}>下架</button> : <button className="btn btn-sm btn-primary" onClick={() => setEnabled(x, true)}>重新上架</button>}<button className="btn btn-sm btn-danger" onClick={() => confirm(x.orders_count ? '这个商品已有兑换记录，将下架并保留历史记录。确定继续？' : '确定永久删除这个商品？') && run(() => api(`/api/admin/market/items/${x.id}`, { method:'DELETE' }))}>{x.orders_count ? '删除/下架' : '永久删除'}</button></div></div>)}
     <h3>最近兑换</h3>
-    {orders.length ? orders.map(o => <div className="admin-row" key={o.id}><div><b>{o.username} 兑换 {o.item_title}</b><p>{o.cost_points || o.price} 泓币 · {o.status === 'PENDING' ? '待处理' : '已完成'} · {displayTime(o.created_at)}</p><small>{o.shipping_info ? `收货/备注：${o.shipping_info}` : ''} {o.delivered_content ? `结果：${o.delivered_content}` : ''}</small></div><div className="admin-actions">{o.status === 'PENDING' && <button className="btn btn-sm btn-primary" onClick={() => fulfill(o)}>处理/发货</button>}</div></div>) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}
+    {orders.length ? orders.map(o => <div className="admin-row" key={o.id}><div><b>{o.username} 兑换 {o.item_title}</b><p>{adminOrderMeta(o)}</p><small>{o.payload ? `申请：${decodeOrderNote(o.payload)}` : o.shipping_info ? `收货/备注：${decodeOrderNote(o.shipping_info)}` : ''} {o.delivered_content ? `结果：${decodeOrderNote(o.delivered_content)}` : ''}</small></div><div className="admin-actions">{o.status === 'PENDING_AUDIT' && <><button className="btn btn-sm btn-success" onClick={() => audit(o, true)}>通过</button><button className="btn btn-sm btn-danger" onClick={() => audit(o, false)}>拒绝并退款</button></>}{o.status === 'PENDING' && <button className="btn btn-sm btn-primary" onClick={() => fulfill(o)}>处理/发货</button>}</div></div>) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}
     <h3>积分流水</h3>
     {ledgers.length ? ledgers.map(l => <div className="admin-line" key={l.id}><span>{l.username} · {l.reason}</span><span className={l.delta >= 0 ? 'ledger-plus' : 'ledger-minus'}>{l.delta > 0 ? '+' : ''}{l.delta}</span></div>) : <div className="empty-state"><i className="fas fa-coins" /><p>暂无流水</p></div>}
   </div>
@@ -1370,16 +1380,46 @@ function AdminSettings({ data, draft, setDraft, run }) {
 }
 
 
+function ExchangeModal({ item, balance, busy, onClose, onSubmit }) {
+  const [step, setStep] = useState('confirm')
+  const [value, setValue] = useState('')
+  const [localErr, setLocalErr] = useState('')
+  if (!item) return null
+  const type = item.title === '改名卡' ? 'rename' : (item.title === '头衔申请券' || item.title === '自定义头衔卡') ? 'title' : ''
+  const isAudit = Boolean(type)
+  const label = type === 'rename' ? '新用户名' : '期望头衔名称'
+  const hint = type === 'rename' ? '必须以字母开头，只能包含字母、数字和下划线。' : '建议 2-12 个字，管理员审核后展示在个人资料和帖子旁。'
+  const usernameOk = /^[a-zA-Z][a-zA-Z0-9_]*$/.test(value.trim())
+  const canSubmit = !busy && value.trim() && (type !== 'rename' || usernameOk)
+  const submit = async () => {
+    const v = value.trim()
+    if (type === 'rename' && !usernameOk) return setLocalErr('用户名必须以字母开头，且只能包含字母、数字和下划线！')
+    if (!v) return setLocalErr(`请填写${label}`)
+    setLocalErr('')
+    await onSubmit(item, v)
+    setStep('done')
+  }
+  return <div className="exchange-mask" role="dialog" aria-modal="true"><div className={`exchange-modal exchange-step-${step}`}>
+    <button className="exchange-close" onClick={onClose} disabled={busy} aria-label="关闭"><i className="fas fa-xmark" /></button>
+    <div className="exchange-icon"><i className={`fas ${step === 'done' ? 'fa-check' : item.cover_icon || 'fa-gift'}`} /></div>
+    {step === 'confirm' && <><h3>确认兑换「{item.title}」？</h3><p>将扣除 <b>{item.price}</b> 泓币，当前余额 {Number(balance || 0).toLocaleString()} 泓币。</p><div className="exchange-actions"><button className="btn btn-secondary" onClick={onClose}>取消</button><button className="btn btn-primary" onClick={() => isAudit ? setStep('form') : onSubmit(item)} disabled={busy || (balance || 0) < item.price}>{busy ? '提交中...' : '确认兑换'}</button></div></>}
+    {step === 'form' && <><h3>{item.title}申请信息</h3><p>确认后会先扣除泓币，订单进入待审核；拒绝时系统自动退款。</p><label className="exchange-field"><span>{label}</span><input autoFocus className={`form-input ${localErr ? 'input-error' : ''}`} value={value} maxLength={32} onChange={e => { setValue(e.target.value); setLocalErr('') }} placeholder={type === 'rename' ? 'New_Name123' : '例如：社区共创者'} /></label><small className={type === 'rename' && value && !usernameOk ? 'field-error' : 'field-hint'}>{type === 'rename' && value && !usernameOk ? '用户名必须以字母开头，且只能包含字母、数字和下划线！' : hint}</small>{localErr && <div className="alert alert-error compact-alert">{localErr}</div>}<div className="exchange-actions"><button className="btn btn-secondary" onClick={() => setStep('confirm')} disabled={busy}>返回</button><button className="btn btn-primary" onClick={submit} disabled={!canSubmit}>{busy ? '提交中...' : '提交审核'}</button></div></>}
+    {step === 'done' && <><h3>申请已提交</h3><p>申请已提交，请等待管理员审核。</p><div className="exchange-actions"><button className="btn btn-primary" onClick={onClose}>知道了</button></div></>}
+  </div></div>
+}
+
 function MarketPage({ me }) {
   const [data, setData] = useState(null)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(0)
   const [showOrders, setShowOrders] = useState(true)
+  const [activeItem, setActiveItem] = useState(null)
   const load = () => api('/api/market').then(d => { setData(d); document.title = '泓市场 - 泓聊社区' }).catch(e => setErr(e.message))
   useEffect(() => { document.title = '泓市场 - 泓聊社区'; setData(null); setErr(''); load() }, [])
-  async function buy(item) {
+  async function buy(item, auditValue = '') {
+    const isAuditItem = item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡'
     const body = { item_id: item.id }
-    if (item.category === 'PERIPHERAL_PHYSICAL') {
+    if (!isAuditItem && item.category === 'PERIPHERAL_PHYSICAL') {
       const shipping_name = prompt('收货人姓名：', '')
       if (!shipping_name?.trim()) return
       const shipping_phone = prompt('联系电话：', '')
@@ -1388,21 +1428,17 @@ function MarketPage({ me }) {
       if (!shipping_address?.trim()) return
       Object.assign(body, { shipping_name:shipping_name.trim(), shipping_phone:shipping_phone.trim(), shipping_address:shipping_address.trim() })
     }
-    if (item.title === '改名卡') {
-      const request_note = prompt('请输入想修改的新昵称：', '')
-      if (!request_note?.trim()) return
-      body.request_note = `新昵称：${request_note.trim()}`
-    }
-    if (item.title === '头衔申请券') {
-      const request_note = prompt('请输入想申请的个人头衔：', '')
-      if (!request_note?.trim()) return
-      body.request_note = `申请头衔：${request_note.trim()}`
-    }
-    if (!confirm(`确定花费 ${item.price} 泓币兑换「${item.title}」？`)) return
     setBusy(item.id); setErr('')
-    try { const r = await api('/api/market/buy', { method:'POST', body: JSON.stringify(body) }); notify(r.status === 'PENDING' ? '兑换成功，等待管理员处理' : '兑换成功', 'success'); setData(d => ({ ...d, balance: r.balance })); load() }
-    catch (e) { setErr(e.message); notify(e.message, 'error') }
-    finally { setBusy(0) }
+    try {
+      const endpoint = isAuditItem ? '/api/market/exchange' : '/api/market/buy'
+      const r = await api(endpoint, { method:'POST', body: JSON.stringify(isAuditItem ? { item_id:item.id, value:auditValue } : body) })
+      notify(isAuditItem ? '申请已提交，请等待管理员审核' : (r.status === 'PENDING' ? '兑换成功，等待管理员处理' : '兑换成功'), 'success')
+      setData(d => ({ ...d, balance: r.balance }))
+      load()
+      return r
+    } catch (e) {
+      setErr(e.message); notify(e.message, 'error'); throw e
+    } finally { setBusy(0) }
   }
   async function checkin() {
     setErr('')
@@ -1411,7 +1447,7 @@ function MarketPage({ me }) {
   }
   if (!me) return <><PageChrome /><div className="main-content"><div className="alert alert-info">请先 <a href="/login">登录</a> 后进入泓市场</div></div></>
   if (!data && !err) return <HomeSkeleton />
-  return <><PageChrome /><div className="main-content"><div className="market-hero card animate-fadeInUp"><div className="card-body"><span className="channel-pill">泓市场</span><h1>{Number(data?.balance || 0).toLocaleString()} <small>泓币</small></h1><p>发帖和评论获得泓币，可兑换社区权益。</p><button className="btn btn-secondary" onClick={checkin}><i className="fas fa-calendar-check" /> 每日签到</button><div className="market-rules">{(data?.rules || []).map(x => <span key={x}>{x}</span>)}</div></div></div>{err && <div className="alert alert-error">{err}</div>}<div className="market-grid">{data?.items?.map(item => <div className="market-card card" key={item.id}><div className="market-icon"><i className={`fas ${item.cover_icon || 'fa-gift'}`} /></div><div className="market-card-body"><h3>{item.title}</h3><p>{item.description}</p><div className="market-meta"><b>{item.price} 泓币</b><span>{item.stock < 0 ? '不限量' : `库存 ${item.stock}`}</span></div><button className="btn btn-primary" disabled={busy === item.id || item.stock === 0 || (data.balance || 0) < item.price} onClick={() => buy(item)}><i className={`fas ${busy === item.id ? 'fa-spinner fa-spin' : 'fa-bag-shopping'}`} /> {(data.balance || 0) < item.price ? '泓币不足' : item.stock === 0 ? '已售罄' : '兑换'}</button></div></div>)}</div><div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-receipt" /> 我的兑换记录</h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data?.orders?.length ? data.orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}</div>}</div></div></>
+  return <><PageChrome /><div className="main-content"><div className="market-hero card animate-fadeInUp"><div className="card-body"><span className="channel-pill">泓市场</span><h1>{Number(data?.balance || 0).toLocaleString()} <small>泓币</small></h1><p>发帖和评论获得泓币，可兑换社区权益。</p><button className="btn btn-secondary" onClick={checkin}><i className="fas fa-calendar-check" /> 每日签到</button><div className="market-rules">{(data?.rules || []).map(x => <span key={x}>{x}</span>)}</div></div></div>{err && <div className="alert alert-error">{err}</div>}<div className="market-grid">{data?.items?.map(item => <div className="market-card card" key={item.id}><div className="market-icon"><i className={`fas ${item.cover_icon || 'fa-gift'}`} /></div><div className="market-card-body"><h3>{item.title}</h3><p>{item.description}</p><div className="market-meta"><b>{item.price} 泓币</b><span>{item.stock < 0 ? '不限量' : `库存 ${item.stock}`}</span></div><button className="btn btn-primary" disabled={busy === item.id || item.stock === 0 || (data.balance || 0) < item.price} onClick={() => setActiveItem(item)}><i className={`fas ${busy === item.id ? 'fa-spinner fa-spin' : 'fa-bag-shopping'}`} /> {(data.balance || 0) < item.price ? '泓币不足' : item.stock === 0 ? '已售罄' : '兑换'}</button></div></div>)}</div><div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-receipt" /> 我的兑换记录</h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data?.orders?.length ? data.orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}</div>}</div></div><ExchangeModal item={activeItem} balance={data?.balance || 0} busy={Boolean(busy)} onClose={() => setActiveItem(null)} onSubmit={async (item, value) => { await buy(item, value); if (!(item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡')) setActiveItem(null) }} /></>
 }
 
 function ChannelsPage() {
