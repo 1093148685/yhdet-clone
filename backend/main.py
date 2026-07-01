@@ -997,6 +997,50 @@ class TopicPresenceManager:
 
 presence_manager = TopicPresenceManager()
 
+class FeedRealtimeManager:
+    def __init__(self):
+        self.connections: set[WebSocket] = set()
+        self.lock = asyncio.Lock()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        async with self.lock:
+            self.connections.add(websocket)
+
+    async def disconnect(self, websocket: WebSocket):
+        async with self.lock:
+            self.connections.discard(websocket)
+
+    async def broadcast(self, message: dict[str, Any]):
+        async with self.lock:
+            targets = list(self.connections)
+        stale = []
+        for ws in targets:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                stale.append(ws)
+        if stale:
+            async with self.lock:
+                for ws in stale:
+                    self.connections.discard(ws)
+
+
+feed_realtime_manager = FeedRealtimeManager()
+
+
+@app.websocket("/ws/feed")
+async def feed_ws(websocket: WebSocket):
+    await feed_realtime_manager.connect(websocket)
+    try:
+        while True:
+            # Keep the connection alive and let clients send heartbeat pings.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await feed_realtime_manager.disconnect(websocket)
+    except Exception:
+        await feed_realtime_manager.disconnect(websocket)
+
 
 @app.websocket("/ws/topics/{post_id}/presence")
 async def topic_presence_ws(websocket: WebSocket, post_id: int, token: str | None = None):
@@ -1522,7 +1566,7 @@ def list_posts(q: str = "", page: int = 1, page_size: int = 30, limit: int | Non
 
 
 @app.post("/api/posts")
-def create_post(payload: PostIn, authorization: str | None = Header(default=None)):
+async def create_post(payload: PostIn, authorization: str | None = Header(default=None)):
     user = require_user(current_user(authorization))
     with db() as conn:
         cur = conn.execute(
@@ -1533,6 +1577,7 @@ def create_post(payload: PostIn, authorization: str | None = Header(default=None
         award_points(conn, user["id"], 12, "发布帖子", "post", post_id)
         post = fetch_post_dict(conn, post_id)
         current_points = refresh_user_points(conn, user["id"])
+    await feed_realtime_manager.broadcast({"type": "post_created", "post_id": post_id, "post": post})
     return {"ok": True, "id": post_id, "post": post, "current_points": int(current_points or 0)}
 
 

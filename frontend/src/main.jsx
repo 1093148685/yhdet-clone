@@ -357,6 +357,12 @@ function Home() {
   const searchTypeRef = useRef(homeStateCache?.searchType || 'posts')
   const restoreScrollRef = useRef(homeStateCache?.scrollY || 0)
   const restoredScrollRef = useRef(false)
+  const queryRef = useRef(query)
+  const usersRef = useRef(users)
+  const feedReconnectRef = useRef(0)
+
+  useEffect(() => { queryRef.current = query }, [query])
+  useEffect(() => { usersRef.current = users }, [users])
 
   async function loadPostsPage({ reset = false, q = query, silent = false } = {}) {
     if (loadingRef.current) return
@@ -393,6 +399,41 @@ function Home() {
     loadHome(false).then(() => { if (alive && !homeStateCache?.posts?.length) loadPostsPage({ reset: true, q: '', silent: true }) })
     timer = setInterval(() => { if (!document.hidden) loadHome(true) }, 15000)
     return () => { alive = false; clearInterval(timer) }
+  }, [])
+
+  useEffect(() => {
+    let closed = false
+    let ws = null
+    let heartbeat = 0
+    const connect = () => {
+      ws = new WebSocket(websocketUrl('/ws/feed'))
+      ws.onopen = () => {
+        if (heartbeat) clearInterval(heartbeat)
+        heartbeat = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send('ping') }, 12000)
+      }
+      ws.onmessage = ev => {
+        try {
+          const msg = JSON.parse(ev.data)
+          if (msg.type !== 'post_created' || !msg.post) return
+          // Only auto-insert on the normal latest-post feed. Do not disturb search/user-result views.
+          if (queryRef.current || usersRef.current) return
+          setPosts(prev => [msg.post, ...prev.filter(p => p.id !== msg.post.id)])
+          setTotalPosts(v => Number(v || 0) + 1)
+        } catch (_) {}
+      }
+      ws.onclose = () => {
+        if (heartbeat) clearInterval(heartbeat)
+        if (!closed) feedReconnectRef.current = setTimeout(connect, 1500)
+      }
+      ws.onerror = () => { try { ws.close() } catch (_) {} }
+    }
+    connect()
+    return () => {
+      closed = true
+      if (heartbeat) clearInterval(heartbeat)
+      if (feedReconnectRef.current) clearTimeout(feedReconnectRef.current)
+      try { ws?.close() } catch (_) {}
+    }
   }, [])
 
   useEffect(() => {
