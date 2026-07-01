@@ -23,11 +23,20 @@ function onAvatarError(e) {
     img.style.display = 'none'
   }
 }
-function avatarBorderStyle(user) { return user?.avatar_border_style || '#FFFFFF' }
+function normalizeAvatarBorderStyle(style = '') {
+  return String(style || '').trim()
+}
+function hasAvatarPrivilegeBorder(user) {
+  const s = normalizeAvatarBorderStyle(user?.avatar_border_style).toLowerCase()
+  return Boolean(s && s !== '#fff' && s !== '#ffffff' && s !== 'white' && s !== 'transparent' && s !== 'rgba(0,0,0,0)' && s !== 'rgba(0, 0, 0, 0)')
+}
+function avatarBorderStyle(user) { return hasAvatarPrivilegeBorder(user) ? normalizeAvatarBorderStyle(user?.avatar_border_style) : 'transparent' }
 function AvatarRing({ user, src, alt = '头像', size = 48, className = '', imgClassName = '', href = '', title = '' }) {
   const image = safeAvatar(src || user?.avatar)
-  const ring = <div className={`avatar-ring ${className}`} style={{ width:size, height:size, padding:3, background: avatarBorderStyle(user) }} title={title || user?.username || alt}>
-    <img src={image} alt={alt} className={`avatar-ring-img ${imgClassName}`} loading="lazy" decoding="async" onError={onAvatarError} />
+  const privileged = hasAvatarPrivilegeBorder(user)
+  const ringStyle = { width:size, height:size, padding: privileged ? 1.5 : 0, background: privileged ? avatarBorderStyle(user) : 'transparent' }
+  const ring = <div className={`avatar-ring ${privileged ? 'has-privilege-ring' : 'no-privilege-ring'} ${className}`} style={ringStyle} title={title || user?.username || alt}>
+    <img src={image} alt={alt} className={`avatar-ring-img ${privileged ? 'has-privilege-img' : 'no-privilege-img'} ${imgClassName}`} loading="lazy" decoding="async" onError={onAvatarError} />
   </div>
   return href ? <a href={href} className="avatar-ring-link">{ring}</a> : ring
 }
@@ -1304,6 +1313,12 @@ function AdminMarket({ data, draft, setDraft, run }) {
     ],
     THEME_DRESSUP: [
       { title:'深色主题', description:'系统自动解锁深色主题。', cover_icon:'fa-palette', payload_json:'{"theme_id":"dark"}' },
+      { title:'头像颜色卡·绿色', description:'绿色头像外环，清爽初级身份标识。', cover_icon:'fa-circle', payload_json:'{"effect":"avatar_border_style","key":"avatar_border_green","style":"#34D399","tier":"初级"}' },
+      { title:'头像颜色卡·蓝色', description:'蓝色头像外环，标准活跃成员标识。', cover_icon:'fa-circle', payload_json:'{"effect":"avatar_border_style","key":"avatar_border_blue","style":"#60A5FA","tier":"标准"}' },
+      { title:'头像颜色卡·紫色', description:'紫色头像外环，高级个性身份标识。', cover_icon:'fa-circle', payload_json:'{"effect":"avatar_border_style","key":"avatar_border_purple","style":"#A78BFA","tier":"高级"}' },
+      { title:'头像颜色卡·粉色', description:'粉色头像外环，幻彩醒目身份标识。', cover_icon:'fa-circle', payload_json:'{"effect":"avatar_border_style","key":"avatar_border_pink","style":"#F472B6","tier":"幻彩"}' },
+      { title:'头像颜色卡·金色', description:'金色头像外环，至尊成员身份标识。', cover_icon:'fa-crown', payload_json:'{"effect":"avatar_border_style","key":"avatar_border_gold","style":"#FBBF24","tier":"至尊"}' },
+      { title:'谷歌至尊四色环', description:'谷歌官方四色渐变头像环，神话级尊贵标识。', cover_icon:'fa-gem', payload_json:'{"effect":"avatar_border_style","key":"avatar_border_google","style":"conic-gradient(#4285F4, #EA4335, #FBBC05, #34A853, #4285F4)","tier":"神话级"}' },
     ],
     RARE_PERK: [
       { title:'红色用户名', description:'稀有权益：用户名显示为红色，覆盖个人信息面板、帖子列表和评论区。', cover_icon:'fa-gem', payload_json:'{"perk":"red_username"}' },
