@@ -707,6 +707,7 @@ def init_db() -> None:
                 (product["desc"], product["category"], product["icon"], payload_json, now(), product["title"]),
             )
         conn.execute("UPDATE users SET avatar_border_style=? WHERE COALESCE(avatar_border_style,'')=''", (DEFAULT_AVATAR_BORDER_STYLE,))
+        reconcile_successful_cosmetic_orders(conn)
         conn.execute("UPDATE market_items SET description=?, payload_json=?, category=?, cover_icon=?, price=CASE WHEN COALESCE(price,0)<=0 THEN 188 ELSE price END, updated_at=? WHERE title='改名卡'", ("兑换后提交想修改的新昵称，管理员审核后处理。", '{"request_type":"rename"}', ProductCategory.MEMBER_BENEFIT.value, 'fa-id-card', now()))
         conn.execute("UPDATE market_items SET description=?, payload_json=?, category=?, cover_icon=?, price=CASE WHEN COALESCE(price,0)<=0 THEN 288 ELSE price END, stock=CASE WHEN COALESCE(stock,0)=0 THEN 10 ELSE stock END, updated_at=? WHERE title='头衔申请券'", ("提交你想展示的个人头衔，管理员审核后处理。", '{"request_type":"custom_title"}', ProductCategory.MEMBER_BENEFIT.value, 'fa-crown', now()))
         if conn.execute("SELECT COUNT(*) FROM users WHERE COALESCE(deleted_at,'')='' ").fetchone()[0] == 0:
@@ -2165,12 +2166,17 @@ def checkin_points(conn: sqlite3.Connection, user_id: int) -> dict[str, Any]:
     return {"ok": True, "already": False, "earned": earned, "streak": streak, "balance": balance}
 
 
-def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category: str, item: sqlite3.Row) -> str:
-    payload_raw = item["payload_json"] if "payload_json" in item.keys() else "{}"
+def market_item_payload(item: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    payload_raw = (item.get("payload_json") if isinstance(item, dict) else item["payload_json"] if "payload_json" in item.keys() else "{}") or "{}"
     try:
-        payload = json.loads(payload_raw or "{}")
+        return json.loads(payload_raw or "{}")
     except Exception:
-        payload = {}
+        return {}
+
+
+def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category: str, item: sqlite3.Row | dict[str, Any]) -> str:
+    payload = market_item_payload(item)
+    item_title = item.get("title") if isinstance(item, dict) else item["title"]
     if category == ProductCategory.MEMBER_BENEFIT.value:
         if str(payload.get("effect") or "").strip() == "custom_title":
             title = str(payload.get("title") or item["title"]).strip()[:24]
@@ -2196,7 +2202,7 @@ def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category:
             if not (style.startswith("#") or style.startswith("conic-gradient(")):
                 raise HTTPException(status_code=400, detail="头像边框样式配置异常")
             conn.execute("UPDATE users SET avatar_border_style=? WHERE id=?", (style[:240], user_id))
-            return f"头像环已生效：{payload.get('tier') or item['title']}"
+            return f"头像环已生效：{payload.get('tier') or item_title}"
         if effect == "username_badge":
             label = str(payload.get("label") or "").strip()[:4]
             if not label:
@@ -2215,7 +2221,7 @@ def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category:
                 raise HTTPException(status_code=400, detail="评论纸配置异常")
             conn.execute("UPDATE users SET comment_theme=? WHERE id=?", (key, user_id))
             return "评论纸已生效"
-        theme_id = str(payload.get("theme_id") or item["title"]).strip()[:80]
+        theme_id = str(payload.get("theme_id") or item_title).strip()[:80]
         row = conn.execute("SELECT unlocked_themes FROM users WHERE id=?", (user_id,)).fetchone()
         themes = []
         try:
@@ -2227,8 +2233,8 @@ def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category:
         conn.execute("UPDATE users SET unlocked_themes=? WHERE id=?", (json.dumps(themes, ensure_ascii=False), user_id))
         return f"已解锁主题：{theme_id}"
     if category == ProductCategory.RARE_PERK.value:
-        perk = str(payload.get("perk") or item["title"]).strip()[:120]
-        perk_key = "red_username" if perk in ("red_username", "红色用户名") or item["title"] == "红色用户名" else perk
+        perk = str(payload.get("perk") or item_title).strip()[:120]
+        perk_key = "red_username" if perk in ("red_username", "红色用户名") or item_title == "红色用户名" else perk
         row = conn.execute("SELECT rare_perks FROM users WHERE id=?", (user_id,)).fetchone()
         perks = []
         try:
@@ -2285,6 +2291,41 @@ def shipping_text(payload: MarketBuyIn) -> str:
     return json.dumps({"name": name, "phone": phone, "address": address}, ensure_ascii=False)
 
 
+def reconcile_successful_cosmetic_orders(conn: sqlite3.Connection, user_id: int | None = None) -> int:
+    """Replay idempotent successful cosmetic orders.
+
+    This repairs orders redeemed while an older process was still running and
+    treated new payloads as generic unlocked themes instead of writing the
+    display fields used by the UI. Only idempotent decoration effects are
+    replayed; VIP/day-based benefits are intentionally excluded.
+    """
+    params: list[Any] = []
+    where_user = ""
+    if user_id is not None:
+        where_user = " AND o.user_id=?"
+        params.append(user_id)
+    rows = conn.execute(
+        f"""
+        SELECT o.user_id, mi.*
+        FROM market_orders o
+        JOIN market_items mi ON mi.id=o.item_id
+        WHERE o.status=?
+          AND mi.category IN (?, ?)
+          {where_user}
+        ORDER BY o.id ASC
+        """,
+        [OrderStatus.SUCCESS.value, ProductCategory.THEME_DRESSUP.value, ProductCategory.MEMBER_BENEFIT.value, *params],
+    ).fetchall()
+    count = 0
+    for row in rows:
+        payload = market_item_payload(row)
+        effect = str(payload.get("effect") or "").strip()
+        if effect in {"avatar_border_style", "username_badge", "profile_theme", "comment_theme", "custom_title"}:
+            apply_direct_market_effect(conn, row["user_id"], normalize_market_category(row["category"]), row)
+            count += 1
+    return count
+
+
 @app.post("/api/points/checkin")
 def points_checkin(authorization: str | None = Header(default=None)):
     user = require_user(current_user(authorization))
@@ -2302,6 +2343,9 @@ def market_home(authorization: str | None = Header(default=None)):
         items = conn.execute("SELECT * FROM market_items WHERE enabled=1 ORDER BY price ASC, id ASC").fetchall()
         orders = []
         if user:
+            repaired = reconcile_successful_cosmetic_orders(conn, user["id"])
+            if repaired:
+                balance = refresh_user_points(conn, user["id"])
             orders = conn.execute(
                 """
                 SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
