@@ -763,6 +763,62 @@ def comment_row_to_dict(c: sqlite3.Row, viewer: sqlite3.Row | None = None) -> di
     }
 
 
+def fetch_post_dict(conn: sqlite3.Connection, post_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style,
+               (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND (COALESCE(c.deleted_at,'')='' OR EXISTS (SELECT 1 FROM comments child WHERE child.reply_to_comment_id=c.id AND child.post_id=c.post_id))) AS comment_count
+        FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?
+        """,
+        (post_id,),
+    ).fetchone()
+    return post_row_to_dict(row) if row else None
+
+
+def fetch_comment_dict(conn: sqlite3.Connection, post_id: int, comment_id: int, viewer: sqlite3.Row | None = None) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT c.*, u.username, u.avatar, u.avatar_border_style, u.role, u.role_label, u.rare_perks,
+               ru.id AS reply_user_id, ru.username AS reply_author, ru.avatar AS reply_avatar,
+               rc.content AS reply_content, rc.deleted_at AS reply_deleted_at
+        FROM comments c
+        JOIN users u ON u.id=c.user_id
+        LEFT JOIN comments rc ON rc.id=c.reply_to_comment_id AND rc.post_id=c.post_id
+        LEFT JOIN users ru ON ru.id=rc.user_id
+        WHERE c.id=? AND c.post_id=?
+        """,
+        (comment_id, post_id),
+    ).fetchone()
+    return comment_row_to_dict(row, viewer) if row else None
+
+
+def fetch_market_order_dict(conn: sqlite3.Connection, order_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
+        LEFT JOIN market_items mi ON mi.id=o.item_id
+        WHERE o.id=?
+        """,
+        (order_id,),
+    ).fetchone()
+    return market_order_to_dict(row) if row else None
+
+
+def fetch_admin_market_order_dict(conn: sqlite3.Connection, order_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT o.*, u.username, mi.title AS item_title, mi.cover_icon FROM market_orders o
+        JOIN users u ON u.id=o.user_id
+        LEFT JOIN market_items mi ON mi.id=o.item_id
+        WHERE o.id=?
+        """,
+        (order_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "username": row["username"], "item_title": row["item_title"], "price": row["price"], "cost_points": row["cost_points"], "category": row["category"], "status": row["status"], "shipping_info": row["shipping_info"], "payload": row["payload"] if "payload" in row.keys() else "", "delivered_content": row["delivered_content"], "created_at": row["created_at"], "fulfilled_at": row["fulfilled_at"]}
+
+
 def current_user(authorization: str | None = Header(default=None)) -> sqlite3.Row | None:
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
@@ -1455,8 +1511,11 @@ def create_post(payload: PostIn, authorization: str | None = Header(default=None
             "INSERT INTO posts(user_id,title,content,views,pinned,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
             (user["id"], payload.title.strip(), payload.content.strip(), 0, 0, now(), now()),
         )
-        award_points(conn, user["id"], 12, "发布帖子", "post", cur.lastrowid)
-    return {"id": cur.lastrowid}
+        post_id = cur.lastrowid
+        award_points(conn, user["id"], 12, "发布帖子", "post", post_id)
+        post = fetch_post_dict(conn, post_id)
+        current_points = refresh_user_points(conn, user["id"])
+    return {"ok": True, "id": post_id, "post": post, "current_points": int(current_points or 0)}
 
 
 @app.get("/api/posts/{post_id}")
@@ -1530,10 +1589,14 @@ async def add_comment(post_id: int, payload: CommentIn, authorization: str | Non
             if not reply_exists:
                 raise HTTPException(status_code=400, detail="回复的评论不存在")
         cur = conn.execute("INSERT INTO comments(post_id,user_id,content,reply_to_comment_id,created_at) VALUES(?,?,?,?,?)", (post_id, user["id"], payload.content.strip(), reply_to_comment_id, now()))
-        award_points(conn, user["id"], 3, "发表评论", "comment", cur.lastrowid)
-        _record_comment_notification(conn, exists, user, cur.lastrowid, payload.content.strip())
-    await presence_manager.broadcast(post_id, {"type": "comment_created", "post_id": post_id, "comment_id": cur.lastrowid})
-    return {"id": cur.lastrowid}
+        comment_id = cur.lastrowid
+        award_points(conn, user["id"], 3, "发表评论", "comment", comment_id)
+        _record_comment_notification(conn, exists, user, comment_id, payload.content.strip())
+        comment = fetch_comment_dict(conn, post_id, comment_id, user)
+        comment_count = conn.execute("SELECT COUNT(*) FROM comments WHERE post_id=? AND COALESCE(deleted_at,'')=''", (post_id,)).fetchone()[0]
+        current_points = refresh_user_points(conn, user["id"])
+    await presence_manager.broadcast(post_id, {"type": "comment_created", "post_id": post_id, "comment_id": comment_id, "comment": comment})
+    return {"ok": True, "id": comment_id, "comment": comment, "comment_count": int(comment_count or 0), "current_points": int(current_points or 0)}
 
 
 @app.patch("/api/posts/{post_id}/comments/{comment_id}")
@@ -1551,8 +1614,9 @@ async def update_comment(post_id: int, comment_id: int, payload: CommentIn, auth
         if row["user_id"] != user["id"] and user["role"] != "admin":
             raise HTTPException(status_code=403, detail="无权编辑这条评论")
         conn.execute("UPDATE comments SET content=?, updated_at=? WHERE id=?", (content, now(), comment_id))
-    await presence_manager.broadcast(post_id, {"type": "comment_updated", "post_id": post_id, "comment_id": comment_id})
-    return {"ok": True}
+        comment = fetch_comment_dict(conn, post_id, comment_id, user)
+    await presence_manager.broadcast(post_id, {"type": "comment_updated", "post_id": post_id, "comment_id": comment_id, "comment": comment})
+    return {"ok": True, "comment": comment}
 
 
 @app.delete("/api/posts/{post_id}/comments/{comment_id}")
@@ -1571,8 +1635,10 @@ async def delete_comment(post_id: int, comment_id: int, authorization: str | Non
             "UPDATE comments SET content='', deleted_at=?, deleted_by=?, deleted_by_admin=?, updated_at=? WHERE id=?",
             (now(), user["id"], deleted_by_admin, now(), comment_id),
         )
-    await presence_manager.broadcast(post_id, {"type": "comment_deleted", "post_id": post_id, "comment_id": comment_id})
-    return {"ok": True}
+        comment = fetch_comment_dict(conn, post_id, comment_id, user)
+        has_visible_replies = conn.execute("SELECT COUNT(*) FROM comments WHERE post_id=? AND reply_to_comment_id=? AND COALESCE(deleted_at,'')=''", (post_id, comment_id)).fetchone()[0] > 0
+    await presence_manager.broadcast(post_id, {"type": "comment_deleted", "post_id": post_id, "comment_id": comment_id, "comment": comment, "visible": has_visible_replies})
+    return {"ok": True, "comment": comment, "visible": has_visible_replies}
 
 
 @app.get("/api/users")
@@ -1930,7 +1996,10 @@ def market_exchange(payload: MarketExchangeIn, authorization: str | None = Heade
         if "locked" in str(e).lower():
             raise HTTPException(status_code=409, detail="系统繁忙，请稍后重试")
         raise
-    return {"ok": True, "order_id": order_id, "status": OrderStatus.PENDING_AUDIT.value, "balance": int(new_balance or 0), "payload": exchange_payload}
+    with db() as conn:
+        order = fetch_market_order_dict(conn, order_id) if order_id else None
+        refreshed = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+    return {"ok": True, "order_id": order_id, "order": order, "status": OrderStatus.PENDING_AUDIT.value, "balance": int(new_balance or 0), "current_points": int(new_balance or 0), "payload": exchange_payload, "user": public_user(refreshed)}
 
 
 @app.post("/api/market/exchange/border")
@@ -1993,7 +2062,10 @@ def market_exchange_border(payload: MarketBorderExchangeIn, authorization: str |
         if "locked" in str(e).lower():
             raise HTTPException(status_code=409, detail="系统繁忙，请稍后重试")
         raise
-    return {"ok": True, "order_id": order_id, "status": OrderStatus.SUCCESS.value, "balance": int(new_balance or 0), "avatar_border_style": payload_data.get("style"), "delivered_content": delivered_content, "user": public_user(refreshed)}
+    with db() as conn:
+        order = fetch_market_order_dict(conn, order_id) if order_id else None
+        refreshed = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+    return {"ok": True, "order_id": order_id, "order": order, "status": OrderStatus.SUCCESS.value, "balance": int(new_balance or 0), "current_points": int(new_balance or 0), "avatar_border_style": payload_data.get("style"), "delivered_content": delivered_content, "user": public_user(refreshed)}
 
 
 @app.post("/api/market/buy")
@@ -2069,7 +2141,10 @@ def market_buy(payload: MarketBuyIn, authorization: str | None = Header(default=
         if "locked" in str(e).lower():
             raise HTTPException(status_code=409, detail="系统繁忙，请稍后重试")
         raise
-    return {"ok": True, "order_id": order_id, "balance": int(new_balance or 0), "status": status, "delivered_content": delivered_content}
+    with db() as conn:
+        order = fetch_market_order_dict(conn, order_id) if order_id else None
+        refreshed = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+    return {"ok": True, "order_id": order_id, "order": order, "balance": int(new_balance or 0), "current_points": int(new_balance or 0), "status": status, "delivered_content": delivered_content, "user": public_user(refreshed)}
 
 
 @app.get("/api/admin/market")
@@ -2243,7 +2318,8 @@ def admin_audit_market_order(order_id: int, payload: MarketAuditIn, authorizatio
                         result = f"已通过头衔申请：{value[:32]}"
                     conn.execute("UPDATE market_orders SET status=?, delivered_content=?, fulfilled_at=?, fulfilled_by=? WHERE id=?", (OrderStatus.SUCCESS.value, result, now(), admin["id"], order_id))
                     conn.commit()
-                    return {"ok": True, "status": OrderStatus.SUCCESS.value, "message": result}
+                    order_state = fetch_admin_market_order_dict(conn, order_id)
+                    return {"ok": True, "status": OrderStatus.SUCCESS.value, "message": result, "order": order_state}
                 reason = (payload.reject_reason or "管理员拒绝该申请").strip()[:500]
                 refund = int(order["cost_points"] or order["price"] or 0)
                 if refund > 0:
@@ -2257,7 +2333,9 @@ def admin_audit_market_order(order_id: int, payload: MarketAuditIn, authorizatio
                 conn.execute("UPDATE market_orders SET status=?, delivered_content=?, fulfilled_at=?, fulfilled_by=? WHERE id=?", (OrderStatus.REJECTED.value, result, now(), admin["id"], order_id))
                 refresh_user_points(conn, order["user_id"])
                 conn.commit()
-                return {"ok": True, "status": OrderStatus.REJECTED.value, "message": result, "refund": refund}
+                order_state = fetch_admin_market_order_dict(conn, order_id)
+                balance = refresh_user_points(conn, order["user_id"])
+                return {"ok": True, "status": OrderStatus.REJECTED.value, "message": result, "refund": refund, "balance": int(balance or 0), "order": order_state}
             except Exception:
                 conn.rollback()
                 raise
@@ -2280,7 +2358,8 @@ def admin_fulfill_market_order(order_id: int, payload: MarketFulfillIn, authoriz
         if fulfillment_method(category) != FulfillmentMethod.MANUAL_PROCESS.value:
             raise HTTPException(status_code=400, detail="该订单不是人工履约类型")
         conn.execute("UPDATE market_orders SET status=?, delivered_content=?, fulfilled_at=?, fulfilled_by=? WHERE id=?", (OrderStatus.SUCCESS.value, payload.delivered_content.strip(), now(), admin["id"], order_id))
-    return {"ok": True}
+        order_state = fetch_admin_market_order_dict(conn, order_id)
+    return {"ok": True, "status": OrderStatus.SUCCESS.value, "order": order_state}
 
 
 @app.get("/api/search")
@@ -2773,7 +2852,13 @@ def add_channel_comment(post_id: int, payload: CommentIn, authorization: str | N
         if not exists:
             raise HTTPException(status_code=404, detail="频道内容不存在")
         cur = conn.execute("INSERT INTO channel_comments(channel_post_id,user_id,content,created_at) VALUES(?,?,?,?)", (post_id, user["id"], payload.content.strip(), now()))
-    return {"id": cur.lastrowid}
+        comment_id = cur.lastrowid
+        row = conn.execute(
+            "SELECT cc.*, u.username, u.avatar, u.avatar_border_style, u.role, u.role_label FROM channel_comments cc JOIN users u ON u.id=cc.user_id WHERE cc.id=?",
+            (comment_id,),
+        ).fetchone()
+        comment = {"id": row["id"], "user_id": row["user_id"], "content": row["content"], "time": row["created_at"], "author": row["username"], "avatar": row["avatar"] or DEFAULT_AVATAR, "avatar_border_style": (row["avatar_border_style"] if "avatar_border_style" in row.keys() else "") or DEFAULT_AVATAR_BORDER_STYLE, "role": row["role_label"] or ("超管" if row["role"] == "admin" else "")}
+    return {"ok": True, "id": comment_id, "comment": comment}
 
 
 @app.get("/api/admin/channels")

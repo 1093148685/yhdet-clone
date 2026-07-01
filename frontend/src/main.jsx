@@ -32,10 +32,15 @@ function hasAvatarPrivilegeBorder(user) {
 }
 function avatarBorderStyle(user) { return hasAvatarPrivilegeBorder(user) ? normalizeAvatarBorderStyle(user?.avatar_border_style) : 'transparent' }
 function AvatarRing({ user, src, alt = '头像', size = 48, className = '', imgClassName = '', href = '', title = '' }) {
-  const image = safeAvatar(src || user?.avatar)
-  const privileged = hasAvatarPrivilegeBorder(user)
-  const ringStyle = { width:size, height:size, padding: privileged ? 1.5 : 0, background: privileged ? avatarBorderStyle(user) : 'transparent' }
-  const ring = <div className={`avatar-ring ${privileged ? 'has-privilege-ring' : 'no-privilege-ring'} ${className}`} style={ringStyle} title={title || user?.username || alt}>
+  let liveUser = user || {}
+  try {
+    const current = JSON.parse(localStorage.getItem('yhdet_user') || '{}')
+    if (current?.id && liveUser?.id && String(current.id) === String(liveUser.id)) liveUser = { ...liveUser, ...current }
+  } catch {}
+  const image = safeAvatar(src || liveUser?.avatar)
+  const privileged = hasAvatarPrivilegeBorder(liveUser)
+  const ringStyle = { width:size, height:size, padding: privileged ? 1.5 : 0, background: privileged ? avatarBorderStyle(liveUser) : 'transparent' }
+  const ring = <div className={`avatar-ring ${privileged ? 'has-privilege-ring' : 'no-privilege-ring'} ${className}`} style={ringStyle} title={title || liveUser?.username || alt}>
     <img src={image} alt={alt} className={`avatar-ring-img ${privileged ? 'has-privilege-img' : 'no-privilege-img'} ${imgClassName}`} loading="lazy" decoding="async" onError={onAvatarError} />
   </div>
   return href ? <a href={href} className="avatar-ring-link">{ring}</a> : ring
@@ -102,6 +107,16 @@ function useRoute() {
 let chromeCache = null
 let chromePromise = null
 let homeStateCache = null
+function syncStoredUser(user) {
+  if (!user) return null
+  localStorage.setItem('yhdet_user', JSON.stringify(user))
+  window.dispatchEvent(new CustomEvent('app:user-updated', { detail: user }))
+  return user
+}
+function mergeStoredUser(patch = {}) {
+  const current = JSON.parse(localStorage.getItem('yhdet_user') || '{}')
+  return syncStoredUser({ ...current, ...patch })
+}
 function getChrome() {
   if (chromeCache) return Promise.resolve(chromeCache)
   if (!chromePromise) chromePromise = api('/api/chrome').then(d => (chromeCache = d))
@@ -531,7 +546,20 @@ function NewPost({ me }) {
   const [err, setErr] = useState('')
   const [saving, setSaving] = useState(false)
   if (!me) return <div className="main-content"><div className="alert alert-info"><i className="fas fa-info-circle" /> 请先 <a href="/login">登录</a> 后发帖</div></div>
-  async function submit(e) { e.preventDefault(); setErr(''); if (!title.trim() || !content.trim()) return setErr('标题和内容不能为空'); setSaving(true); try { const res = await api('/api/posts', { method: 'POST', body: JSON.stringify({ title: title.trim(), content: content.trim() }) }); notify('发布成功', 'success'); navigate(`/post/${res.id}`) } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSaving(false) } }
+  async function submit(e) {
+    e.preventDefault(); setErr('')
+    if (!title.trim() || !content.trim()) return setErr('标题和内容不能为空')
+    setSaving(true)
+    try {
+      const res = await api('/api/posts', { method: 'POST', body: JSON.stringify({ title: title.trim(), content: content.trim() }) })
+      const newPost = res.post || { id: res.id, title:title.trim(), content:content.trim(), preview:content.trim(), author:me.username, avatar:me.avatar, avatar_border_style:me.avatar_border_style, user_id:me.id, time:new Date().toISOString(), comments:0, views:0 }
+      homeStateCache = homeStateCache ? { ...homeStateCache, posts: [newPost, ...(homeStateCache.posts || []).filter(p => p.id !== newPost.id)], totalPosts: (homeStateCache.totalPosts || 0) + 1 } : { data:null, posts:[newPost], totalPosts:1, scrollY:0 }
+      setTitle(''); setContent('')
+      if (res.current_points !== undefined) mergeStoredUser({ available_points: res.current_points })
+      notify('发布成功，已同步到首页', 'success')
+      navigate(`/post/${newPost.id}`)
+    } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSaving(false) }
+  }
   return <div className="main-content"><div className="card"><div className="card-header"><h3><i className="fas fa-pen" /> 发布帖子</h3></div><div className="card-body">{err && <div className="alert alert-error">{err}</div>}<form onSubmit={submit}><div className="form-group"><label className="form-label">标题</label><input className="form-input" required maxLength={120} value={title} onChange={e => setTitle(e.target.value)} placeholder="请输入标题" disabled={saving} /></div><div className="form-group"><label className="form-label">内容</label><textarea className="form-textarea" required maxLength={10000} value={content} onChange={e => setContent(e.target.value)} placeholder="请输入内容" style={{ minHeight: 220 }} disabled={saving} /></div><button className="btn btn-primary" disabled={saving}><i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} /> {saving ? '发布中' : '发布'}</button></form></div></div></div>
 }
 
@@ -825,13 +853,21 @@ function PostDetail({ id, me }) {
   const [detailReady, setDetailReady] = useState(false)
   const editorRef = useRef(null)
   const load = (silent = false) => api(`/api/posts/${id}`).then(d => { setData(d); document.title = `${d.post.title} - 泓聊社区` }).catch(e => { if (!silent) setErr(e.message) })
-  const handleTopicEvent = useMemo(() => {
-    let timer = null
-    return msg => {
-      if (!msg?.type?.startsWith('comment_')) return
-      clearTimeout(timer)
-      timer = setTimeout(() => load(true), 120)
-    }
+  const handleTopicEvent = useMemo(() => msg => {
+    if (!msg?.type?.startsWith('comment_')) return
+    setData(old => {
+      if (!old) return old
+      if (msg.type === 'comment_created' && msg.comment) {
+        if (old.comments?.some(c => c.id === msg.comment.id)) return old
+        return { ...old, comments: [...(old.comments || []), msg.comment], post: { ...old.post, comments: Number(old.post.comments || 0) + 1 } }
+      }
+      if (msg.type === 'comment_updated' && msg.comment) return { ...old, comments: (old.comments || []).map(c => c.id === msg.comment.id ? msg.comment : c) }
+      if (msg.type === 'comment_deleted') {
+        if (msg.visible && msg.comment) return { ...old, comments: (old.comments || []).map(c => c.id === msg.comment.id ? msg.comment : c) }
+        return { ...old, comments: (old.comments || []).filter(c => c.id !== msg.comment_id), post: { ...old.post, comments: Math.max(0, Number(old.post.comments || 0) - 1) } }
+      }
+      return old
+    })
   }, [id])
   const { presence, sendTyping, sendTypingEnd, sendEditing, sendEditingEnd } = useTopicPresence(id, me, handleTopicEvent)
   const draftKey = editingComment ? `yhdet_edit_draft_${editingComment.id}` : ''
@@ -876,18 +912,23 @@ function PostDetail({ id, me }) {
     if (!nextContent) return setErr('评论内容不能为空')
     setSending(true); setErr('')
     try {
-      await api(`/api/posts/${id}/comments/${editingComment.id}`, { method: 'PATCH', body: JSON.stringify({ content: nextContent, reply_to_comment_id: editingComment.reply_to_comment_id || null }) })
+      const r = await api(`/api/posts/${id}/comments/${editingComment.id}`, { method: 'PATCH', body: JSON.stringify({ content: nextContent, reply_to_comment_id: editingComment.reply_to_comment_id || null }) })
       localStorage.removeItem(`yhdet_edit_draft_${editingComment.id}`)
       sendEditingEnd(editingComment.id)
       const editedId = editingComment.id
-      setContent(''); setEditingComment(null); setComposerMode('reply'); setEditorOpen(false); notify('修改已保存', 'success'); await load(); setTimeout(() => highlightComment(editedId), 80)
+      if (r.comment) setData(d => d ? { ...d, comments: (d.comments || []).map(c => c.id === r.comment.id ? r.comment : c) } : d)
+      setContent(''); setEditingComment(null); setComposerMode('reply'); setEditorOpen(false); notify('修改已保存', 'success'); setTimeout(() => highlightComment(editedId), 80)
     } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) }
   }
   async function deleteComment(comment) {
     setErr('')
     try {
-      await api(`/api/posts/${id}/comments/${comment.id}`, { method: 'DELETE' })
-      await load()
+      const r = await api(`/api/posts/${id}/comments/${comment.id}`, { method: 'DELETE' })
+      setData(d => {
+        if (!d) return d
+        if (r.visible && r.comment) return { ...d, comments: (d.comments || []).map(c => c.id === r.comment.id ? r.comment : c) }
+        return { ...d, comments: (d.comments || []).filter(c => c.id !== comment.id), post: { ...d.post, comments: Math.max(0, Number(d.post.comments || 0) - 1) } }
+      })
     } catch (e) { setErr(e.message); notify(e.message, 'error'); throw e }
   }
   async function comment(e) {
@@ -896,9 +937,12 @@ function PostDetail({ id, me }) {
     if (!content.trim()) return setErr('评论内容不能为空')
     setSending(true)
     try {
-      await api(`/api/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content: content.trim(), reply_to_comment_id: replyingTo?.id || null }) })
+      const r = await api(`/api/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content: content.trim(), reply_to_comment_id: replyingTo?.id || null }) })
       sendTypingEnd()
-      setContent(''); setReplyingTo(null); setEditorOpen(false); notify('回复已发表', 'success'); await load(); setTimeout(() => location.hash = '', 10)
+      const newComment = r.comment
+      if (newComment) setData(d => d ? { ...d, comments: [...(d.comments || []).filter(c => c.id !== newComment.id), newComment], post: { ...d.post, comments: r.comment_count ?? Number(d.post.comments || 0) + 1 } } : d)
+      if (r.current_points !== undefined) mergeStoredUser({ available_points: r.current_points })
+      setContent(''); setReplyingTo(null); setEditorOpen(false); notify('回复已发表', 'success'); history.replaceState(null, '', location.pathname)
     } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) }
   }
   if (err && !data) return <><PageChrome /><div className="main-content"><div className="alert alert-error">{err}</div></div></>
@@ -1189,10 +1233,18 @@ function AdminPage({ me }) {
       setData(d => ({ ...d, [nextTab]: res }))
     } catch (e) { setErr(e.message) } finally { setBusy(false) }
   }
-  async function run(fn) {
+  async function run(fn, opts = {}) {
+    const { reload = true, apply } = opts
     setErr(''); setBusy(true)
-    try { await fn(); notify('操作完成', 'success'); await load(tab); chromeCache = null; chromePromise = null }
-    catch (e) { setErr(e.message) }
+    try {
+      const res = await fn()
+      if (apply) apply(res)
+      notify('操作完成', 'success')
+      if (reload) await load(tab)
+      chromeCache = null; chromePromise = null
+      return res
+    }
+    catch (e) { setErr(e.message); notify(e.message, 'error'); return null }
     finally { setBusy(false) }
   }
   const items = data[tab]?.items || []
@@ -1212,7 +1264,7 @@ function AdminPage({ me }) {
     {tab === 'announcements' && <AdminAnnouncements items={items} draft={draft} setDraft={setDraft} run={run} />}
     {tab === 'donors' && <AdminDonors items={items} draft={draft} setDraft={setDraft} run={run} />}
     {tab === 'channels' && <AdminChannels data={data.channels} draft={draft} setDraft={setDraft} run={run} />}
-    {tab === 'market' && <AdminMarket data={data.market} draft={draft} setDraft={setDraft} run={run} />}
+    {tab === 'market' && <AdminMarket data={data.market} setAdminData={setData} draft={draft} setDraft={setDraft} run={run} />}
     {tab === 'settings' && <AdminSettings data={data.settings} draft={draft} setDraft={setDraft} run={run} />} 
   </div>
 }
@@ -1288,7 +1340,7 @@ function AdminUsers({ items, run }) {
 function AdminAnnouncements({ items, draft, setDraft, run }) { return <div className="admin-card"><h3>公告管理</h3><div className="admin-create"><input className="form-input" placeholder="新公告内容" value={draft.announcement || ''} onChange={e => setDraft({ ...draft, announcement: e.target.value })} /><button className="btn btn-primary" onClick={() => draft.announcement?.trim() && run(() => api('/api/admin/announcements', { method:'POST', body: JSON.stringify({ content: draft.announcement.trim() }) }).then(() => setDraft({ ...draft, announcement: '' })))}>发布公告</button></div>{items.map(a => <div className="admin-row" key={a.id}><div><b>{a.content}</b><p>{a.author} · {a.created_at}</p></div><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除公告？') && run(() => api(`/api/admin/announcements/${a.id}`, { method:'DELETE' }))}>删除</button></div>)}</div> }
 function AdminDonors({ items, draft, setDraft, run }) { const d = draft.donor || {}; return <div className="admin-card"><h3>捐赠者管理</h3><div className="admin-create donor-create"><input className="form-input" placeholder="名称" value={d.name || ''} onChange={e => setDraft({ ...draft, donor: { ...d, name: e.target.value } })} /><input className="form-input" placeholder="金额，如 3元" value={d.amount || ''} onChange={e => setDraft({ ...draft, donor: { ...d, amount: e.target.value } })} /><input className="form-input" placeholder="日期，如 2026.6.29" value={d.donated_at || ''} onChange={e => setDraft({ ...draft, donor: { ...d, donated_at: e.target.value } })} /><button className="btn btn-primary" onClick={() => d.name?.trim() && d.amount?.trim() && d.donated_at?.trim() && run(() => api('/api/admin/donors', { method:'POST', body: JSON.stringify({ name: d.name.trim(), amount: d.amount.trim(), donated_at: d.donated_at.trim() }) }).then(() => setDraft({ ...draft, donor: {} })))}>添加</button></div>{items.map(x => <div className="admin-row" key={x.id}><div><b>{x.name}</b><p>{x.amount} · {x.donated_at}</p></div><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除捐赠记录？') && run(() => api(`/api/admin/donors/${x.id}`, { method:'DELETE' }))}>删除</button></div>)}</div> }
 
-function AdminMarket({ data, draft, setDraft, run }) {
+function AdminMarket({ data, setAdminData, draft, setDraft, run }) {
   const items = data?.items || []
   const orders = data?.orders || []
   const ledgers = data?.ledgers || []
@@ -1353,15 +1405,25 @@ function AdminMarket({ data, draft, setDraft, run }) {
     run(() => api('/api/admin/market/add-keys', { method:'POST', body: JSON.stringify({ product_id:x.id, keys_text:keys }) }))
   }
   const setEnabled = (x, enabled) => run(() => api(`/api/admin/market/items/${x.id}/enabled`, { method:'PATCH', body: JSON.stringify({ enabled }) }))
+  const applyOrderPatch = order => {
+    if (!order) return
+    setAdminData(prev => ({
+      ...prev,
+      market: {
+        ...(prev.market || {}),
+        orders: (prev.market?.orders || []).map(x => x.id === order.id ? { ...x, ...order } : x)
+      }
+    }))
+  }
   const fulfill = o => {
     const text = prompt(`处理订单 #${o.id}，填写快递单号或处理结果：`, o.delivered_content || '')
     if (!text?.trim()) return
-    run(() => api(`/api/admin/market/orders/${o.id}/fulfill`, { method:'PUT', body: JSON.stringify({ delivered_content:text.trim() }) }))
+    run(() => api(`/api/admin/market/orders/${o.id}/fulfill`, { method:'PUT', body: JSON.stringify({ delivered_content:text.trim() }) }), { reload:false, apply: r => applyOrderPatch(r?.order) }).catch(()=>{})
   }
   const audit = (o, approved) => {
     const reject_reason = approved ? '' : prompt(`拒绝订单 #${o.id} 的原因：`, '申请内容不符合社区规范')
     if (!approved && !reject_reason?.trim()) return
-    run(() => api(`/api/admin/market/audit/${o.id}`, { method:'PUT', body: JSON.stringify({ approved, reject_reason: reject_reason || '' }) }))
+    run(() => api(`/api/admin/market/audit/${o.id}`, { method:'PUT', body: JSON.stringify({ approved, reject_reason: reject_reason || '' }) }), { reload:false, apply: r => applyOrderPatch(r?.order) }).catch(()=>{})
   }
   const adminOrderMeta = o => `${o.cost_points || o.price} 泓币 · ${orderStatusText(o.status)} · ${displayTime(o.created_at)}`
   return <div className="admin-card"><h3>泓市场后台</h3>
@@ -1387,7 +1449,7 @@ function AdminMarket({ data, draft, setDraft, run }) {
 function AdminSettings({ data, draft, setDraft, run }) {
   const s = draft.settings || data?.settings || {}
   const set = (k, v) => setDraft({ ...draft, settings: { ...s, [k]: v } })
-  const save = () => run(() => api('/api/admin/settings', { method:'PUT', body: JSON.stringify(s) }).then(() => { chromeCache = null; chromePromise = null }))
+  const save = () => run(() => api('/api/admin/settings', { method:'PUT', body: JSON.stringify(s) }).then(r => { chromeCache = null; chromePromise = null; window.dispatchEvent(new CustomEvent('app:settings-updated', { detail:r.settings })); return r }), { reload:false })
   return <div className="admin-card"><h3><i className="fas fa-gear" /> 系统设置</h3>
     <div className="settings-grid">
       <label><span>网站名字</span><input className="form-input" value={s.site_name || ''} placeholder="泓聊社区" onChange={e => set('site_name', e.target.value)} /></label>
@@ -1437,7 +1499,7 @@ function ExchangeModal({ item, balance, busy, onClose, onSubmit }) {
   </div></div>
 }
 
-function MarketPage({ me }) {
+function MarketPage({ me, setMe }) {
   const [data, setData] = useState(null)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(0)
@@ -1463,9 +1525,14 @@ function MarketPage({ me }) {
       const endpoint = isAuditItem ? '/api/market/exchange' : (isBorderItem ? '/api/market/exchange/border' : '/api/market/buy')
       const r = await api(endpoint, { method:'POST', body: JSON.stringify(isAuditItem ? { item_id:item.id, value:auditValue } : body) })
       notify(isAuditItem ? '申请已提交，请等待管理员审核' : (isBorderItem ? '头像环已生效' : (r.status === 'PENDING' ? '兑换成功，等待管理员处理' : '兑换成功')), 'success')
-      setData(d => ({ ...d, balance: r.balance }))
-      if (r.user) { localStorage.setItem('yhdet_user', JSON.stringify(r.user)); window.dispatchEvent(new Event('storage')) }
-      load()
+      if (r.user) { syncStoredUser(r.user); setMe?.(r.user) }
+      else if (r.current_points !== undefined) { const u = mergeStoredUser({ available_points: r.current_points }); if (u?.id) setMe?.(u) }
+      setData(d => ({
+        ...d,
+        balance: r.current_points ?? r.balance ?? d?.balance ?? 0,
+        orders: r.order ? [r.order, ...(d?.orders || []).filter(o => o.id !== r.order.id)].slice(0, 8) : (d?.orders || []),
+        items: (d?.items || []).map(x => x.id === item.id && x.stock > 0 ? { ...x, stock: x.stock - 1 } : x)
+      }))
       return r
     } catch (e) {
       setErr(e.message); notify(e.message, 'error'); throw e
@@ -1478,7 +1545,11 @@ function MarketPage({ me }) {
   }
   if (!me) return <><PageChrome /><div className="main-content"><div className="alert alert-info">请先 <a href="/login">登录</a> 后进入泓市场</div></div></>
   if (!data && !err) return <HomeSkeleton />
-  return <><PageChrome /><div className="main-content"><div className="market-hero card animate-fadeInUp"><div className="card-body"><span className="channel-pill">泓市场</span><h1>{Number(data?.balance || 0).toLocaleString()} <small>泓币</small></h1><p>发帖和评论获得泓币，可兑换社区权益。</p><button className="btn btn-secondary" onClick={checkin}><i className="fas fa-calendar-check" /> 每日签到</button><div className="market-rules">{(data?.rules || []).map(x => <span key={x}>{x}</span>)}</div></div></div>{err && <div className="alert alert-error">{err}</div>}<div className="market-grid">{data?.items?.map(item => <div className="market-card card" key={item.id}><div className="market-icon"><i className={`fas ${item.cover_icon || 'fa-gift'}`} /></div><div className="market-card-body"><h3>{item.title}</h3><p>{item.description}</p><div className="market-meta"><b>{item.price} 泓币</b><span>{item.stock < 0 ? '不限量' : `库存 ${item.stock}`}</span></div><button className="btn btn-primary" disabled={busy === item.id || item.stock === 0 || (data.balance || 0) < item.price} onClick={() => setActiveItem(item)}><i className={`fas ${busy === item.id ? 'fa-spinner fa-spin' : 'fa-bag-shopping'}`} /> {(data.balance || 0) < item.price ? '泓币不足' : item.stock === 0 ? '已售罄' : '兑换'}</button></div></div>)}</div><div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-receipt" /> 我的兑换记录</h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data?.orders?.length ? data.orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}</div>}</div></div><ExchangeModal item={activeItem} balance={data?.balance || 0} busy={Boolean(busy)} onClose={() => setActiveItem(null)} onSubmit={async (item, value) => { await buy(item, value); if (!(item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡' || isAvatarBorderItem(item))) setActiveItem(null) }} /></>
+  const pendingAuditItemIds = new Set((data?.orders || []).filter(o => o.status === 'PENDING_AUDIT').map(o => o.item_id).filter(Boolean))
+  const auditTitles = new Set((data?.orders || []).filter(o => o.status === 'PENDING_AUDIT').map(o => o.title || o.item_title).filter(Boolean))
+  const buttonText = item => auditTitles.has(item.title) || pendingAuditItemIds.has(item.id) ? '审核中' : ((data.balance || 0) < item.price ? '泓币不足' : item.stock === 0 ? '已售罄' : '兑换')
+  const disabledItem = item => busy === item.id || item.stock === 0 || (data.balance || 0) < item.price || auditTitles.has(item.title) || pendingAuditItemIds.has(item.id)
+  return <><PageChrome /><div className="main-content"><div className="market-hero card animate-fadeInUp"><div className="card-body"><span className="channel-pill">泓市场</span><h1>{Number(data?.balance || 0).toLocaleString()} <small>泓币</small></h1><p>发帖和评论获得泓币，可兑换社区权益。</p><button className="btn btn-secondary" onClick={checkin}><i className="fas fa-calendar-check" /> 每日签到</button><div className="market-rules">{(data?.rules || []).map(x => <span key={x}>{x}</span>)}</div></div></div>{err && <div className="alert alert-error">{err}</div>}<div className="market-grid">{data?.items?.map(item => <div className="market-card card animate-fadeInUp" key={item.id}><div className="market-icon"><i className={`fas ${item.cover_icon || 'fa-gift'}`} /></div><div className="market-card-body"><h3>{item.title}</h3><p>{item.description}</p><div className="market-meta"><b>{item.price} 泓币</b><span>{item.stock < 0 ? '不限量' : `库存 ${item.stock}`}</span></div><button className="btn btn-primary" disabled={disabledItem(item)} onClick={() => setActiveItem(item)}><i className={`fas ${busy === item.id ? 'fa-spinner fa-spin' : auditTitles.has(item.title) || pendingAuditItemIds.has(item.id) ? 'fa-hourglass-half' : 'fa-bag-shopping'}`} /> {buttonText(item)}</button></div></div>)}</div><div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-receipt" /> 我的兑换记录</h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data?.orders?.length ? data.orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}</div>}</div></div><ExchangeModal item={activeItem} balance={data?.balance || 0} busy={Boolean(busy)} onClose={() => setActiveItem(null)} onSubmit={async (item, value) => { await buy(item, value); if (!(item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡' || isAvatarBorderItem(item))) setActiveItem(null) }} /></>
 }
 
 function ChannelsPage() {
@@ -1528,7 +1599,7 @@ function ChannelPostDetail({ id, me }) {
   const [sending, setSending] = useState(false)
   const load = () => api(`/api/channel_posts/${id}`).then(d => { setData(d); document.title = `${d.post.title} - 频道` }).catch(e => setErr(e.message))
   useEffect(() => { let alive = true; setData(null); setErr(''); api(`/api/channel_posts/${id}`).then(d => { if (alive) { setData(d); document.title = `${d.post.title} - 频道` } }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
-  async function comment(e) { e.preventDefault(); setErr(''); if (!content.trim()) return setErr('评论内容不能为空'); setSending(true); try { await api(`/api/channel_posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content: content.trim() }) }); setContent(''); notify('评论已发表', 'success'); load() } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) } }
+  async function comment(e) { e.preventDefault(); setErr(''); if (!content.trim()) return setErr('评论内容不能为空'); setSending(true); try { const r = await api(`/api/channel_posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content: content.trim() }) }); if (r.comment) setData(d => d ? { ...d, comments: [...(d.comments || []), r.comment], post: { ...d.post, comments: Number(d.post.comments || 0) + 1 } } : d); setContent(''); notify('评论已发表', 'success') } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) } }
   if (err && !data) return <><PageChrome /><div className="main-content"><div className="alert alert-error">{err}</div></div></>
   if (!data) return <DetailSkeleton />
   const p = data.post
@@ -1598,20 +1669,30 @@ function App() {
   const path = useRoute()
   const [me, setMe] = useState(null)
   const [site, setSite] = useState(defaultSite)
-  useEffect(() => { api('/api/me').then(r => { setMe(r.user); if (r.user) localStorage.setItem('yhdet_user', JSON.stringify(r.user)) }).catch(() => {}) }, [])
+  useEffect(() => { api('/api/me').then(r => { setMe(r.user); if (r.user) syncStoredUser(r.user) }).catch(() => {}) }, [])
+  useEffect(() => {
+    const onUserUpdated = e => setMe(e.detail || JSON.parse(localStorage.getItem('yhdet_user') || 'null'))
+    window.addEventListener('app:user-updated', onUserUpdated)
+    return () => window.removeEventListener('app:user-updated', onUserUpdated)
+  }, [])
   useEffect(() => {
     const onExpired = e => { setMe(null); notify(e.detail || '登录状态已失效', 'error'); navigate('/login') }
     window.addEventListener('app:session-expired', onExpired)
     return () => window.removeEventListener('app:session-expired', onExpired)
   }, [])
   useEffect(() => { getChrome().then(d => { if (d.settings) setSite({ ...defaultSite, ...d.settings, stats: d.stats, runtime: d.runtime }) }).catch(() => {}) }, [])
+  useEffect(() => {
+    const onSettings = e => setSite(s => ({ ...s, ...(e.detail || {}) }))
+    window.addEventListener('app:settings-updated', onSettings)
+    return () => window.removeEventListener('app:settings-updated', onSettings)
+  }, [])
   const page = useMemo(() => {
     const pathname = new URL(path, location.origin).pathname
     if (pathname === '/login') return <AuthPage mode="login" setMe={setMe} site={site} />
     if (pathname === '/register') return <AuthPage mode="register" setMe={setMe} site={site} />
     if (pathname === '/new') return <NewPost me={me} />
     if (pathname === '/channels') return <ChannelsPage />
-    if (pathname === '/market') return <MarketPage me={me} />
+    if (pathname === '/market') return <MarketPage me={me} setMe={setMe} />
     if (pathname.startsWith('/channels/')) return <ChannelDetail slug={pathname.split('/')[2]} />
     if (pathname.startsWith('/channel-post/')) return <ChannelPostDetail id={pathname.split('/')[2]} me={me} />
     if (pathname === '/admin') return <AdminPage me={me} />
