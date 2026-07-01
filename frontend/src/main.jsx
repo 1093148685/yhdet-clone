@@ -934,8 +934,15 @@ function PostDetail({ id, me }) {
     setTimeout(() => el.classList.remove('comment-focus'), 2200)
   }
   function startReply(comment = null) {
-    if (!me) return navigate('/login')
     if (comment?.quote_only && comment.jump_to_id) return highlightComment(comment.jump_to_id)
+    if (!me) {
+      setComposerMode('reply')
+      setEditingComment(null)
+      setReplyingTo(comment)
+      setContent('')
+      setReplyStatus('expanded')
+      return
+    }
     if (composerMode === 'edit' && content !== (editingComment?.content || '') && !confirm('当前编辑内容还没保存，确定切换到回复吗？')) return
     setComposerMode('reply'); setEditingComment(null); setReplyingTo(comment); setContent(''); setReplyStatus('expanded')
   }
