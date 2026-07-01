@@ -235,6 +235,7 @@ def default_settings() -> dict[str, str]:
         "smtp_password": "",
         "smtp_from": "",
         "comment_email_limit_24h": "8",
+        "guest_access_restricted": "0",
         "banners_json": json.dumps(BANNERS, ensure_ascii=False),
     }
 
@@ -250,6 +251,7 @@ def get_settings(conn: sqlite3.Connection, include_secret: bool = False) -> dict
     if not include_secret and data.get("smtp_password"):
         data["smtp_password"] = "***"
     data["email_enabled"] = str(data.get("email_enabled", "0")) in {"1", "true", "True", "yes"}
+    data["guest_access_restricted"] = str(data.get("guest_access_restricted", "0")) in {"1", "true", "True", "yes"}
     try:
         data["comment_email_limit_24h"] = int(data.get("comment_email_limit_24h") or 8)
     except Exception:
@@ -283,6 +285,19 @@ def get_banners_from_settings(settings: dict[str, Any]) -> list[dict[str, str]]:
 
 def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
     conn.execute("INSERT OR REPLACE INTO site_settings(key,value) VALUES(?,?)", (key, str(value or "")))
+
+
+def guest_access_restricted(conn: sqlite3.Connection) -> bool:
+    return bool(get_settings(conn).get("guest_access_restricted"))
+
+
+def require_user_if_guest_restricted(conn: sqlite3.Connection, authorization: str | None) -> sqlite3.Row | None:
+    user = current_user(authorization)
+    if user:
+        return user
+    if guest_access_restricted(conn):
+        require_user(user)
+    return None
 
 
 def current_default_avatar(conn: sqlite3.Connection) -> str:
@@ -595,6 +610,7 @@ def init_db() -> None:
         conn.execute("UPDATE market_items SET category=? WHERE category NOT IN (?,?,?,?,?,?,?,?)", (ProductCategory.GIFT_GENERAL.value, *sorted(ALL_PRODUCT_CATEGORIES)))
         conn.execute("UPDATE users SET avatar=? WHERE avatar LIKE 'https://yhdet.top/static/avatars/%'", (DEFAULT_AVATAR,))
         conn.execute("INSERT OR IGNORE INTO site_settings(key,value) VALUES('default_avatar', ?)", (DEFAULT_AVATAR,))
+        conn.execute("INSERT OR IGNORE INTO site_settings(key,value) VALUES('guest_access_restricted', '0')")
         conn.execute("UPDATE site_settings SET value=? WHERE key='default_avatar' AND value LIKE 'https://yhdet.top/static/avatars/%'", (DEFAULT_AVATAR,))
         market_seed = [
             ("改名卡", "兑换后提交想修改的新昵称，管理员审核后处理。", 188, 20, ProductCategory.MEMBER_BENEFIT.value, "fa-id-card", '{"request_type":"rename"}'),
@@ -1073,6 +1089,7 @@ class SiteSettingsIn(BaseModel):
     smtp_password: str | None = Field(default=None, max_length=500)
     smtp_from: str | None = Field(default=None, max_length=200)
     comment_email_limit_24h: int | None = Field(default=None, ge=0, le=100)
+    guest_access_restricted: bool | None = None
     banners_json: str | None = Field(default=None, max_length=8000)
 
 
@@ -1463,8 +1480,9 @@ def public_user(user: sqlite3.Row | None, default_avatar: str = DEFAULT_AVATAR) 
 @app.get("/api/posts")
 def list_posts(q: str = "", page: int = 1, page_size: int = 30, limit: int | None = None, offset: int | None = None, authorization: str | None = Header(default=None)):
     q_clean = q.strip()
-    if q_clean or int(page or 1) > 1 or limit is not None or offset is not None:
-        require_user(current_user(authorization))
+    with db() as conn:
+        if q_clean or int(page or 1) > 1 or limit is not None or offset is not None:
+            require_user_if_guest_restricted(conn, authorization)
     like = f"%{q_clean}%"
     if limit is not None or offset is not None:
         page_size = limit or page_size
@@ -1644,8 +1662,9 @@ async def delete_comment(post_id: int, comment_id: int, authorization: str | Non
 @app.get("/api/users")
 def users(q: str = "", page: int = 1, page_size: int = 30, limit: int | None = None, offset: int | None = None, authorization: str | None = Header(default=None)):
     q_clean = q.strip()
-    if q_clean or int(page or 1) > 1 or limit is not None or offset is not None:
-        require_user(current_user(authorization))
+    with db() as conn:
+        if q_clean or int(page or 1) > 1 or limit is not None or offset is not None:
+            require_user_if_guest_restricted(conn, authorization)
     like = f"%{q_clean}%"
     if limit is not None or offset is not None:
         page_size = limit or page_size
@@ -1909,23 +1928,28 @@ def points_checkin(authorization: str | None = Header(default=None)):
 
 @app.get("/api/market")
 def market_home(authorization: str | None = Header(default=None)):
-    user = require_user(current_user(authorization))
+    user = current_user(authorization)
     with db() as conn:
-        balance = refresh_user_points(conn, user["id"])
+        if not user and guest_access_restricted(conn):
+            require_user(user)
+        balance = refresh_user_points(conn, user["id"]) if user else 0
         items = conn.execute("SELECT * FROM market_items WHERE enabled=1 ORDER BY price ASC, id ASC").fetchall()
-        orders = conn.execute(
-            """
-            SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
-            JOIN market_items mi ON mi.id=o.item_id
-            WHERE o.user_id=? ORDER BY o.id DESC LIMIT 8
-            """,
-            (user["id"],),
-        ).fetchall()
+        orders = []
+        if user:
+            orders = conn.execute(
+                """
+                SELECT o.*, mi.title, mi.cover_icon FROM market_orders o
+                JOIN market_items mi ON mi.id=o.item_id
+                WHERE o.user_id=? ORDER BY o.id DESC LIMIT 8
+                """,
+                (user["id"],),
+            ).fetchall()
     return {
         "balance": int(balance or 0),
         "items": [{**dict(i), "fulfillment_method": market_item_fulfillment_method(i)} for i in items],
         "orders": [market_order_to_dict(o) for o in orders],
         "rules": ["发布帖子 +12 泓币", "发表评论 +3 泓币", "卡密自动发放，实物/赞助进入待处理"],
+        "guest": not bool(user),
     }
 
 
@@ -2364,7 +2388,8 @@ def admin_fulfill_market_order(order_id: int, payload: MarketFulfillIn, authoriz
 
 @app.get("/api/search")
 def search(q: str = "", type: str = "posts", page: int = 1, page_size: int = 30, limit: int | None = None, offset: int | None = None, authorization: str | None = Header(default=None)):
-    require_user(current_user(authorization))
+    with db() as conn:
+        require_user_if_guest_restricted(conn, authorization)
     if type == "users":
         return users(q=q, page=page, page_size=page_size, limit=limit, offset=offset, authorization=authorization)
     return list_posts(q=q, page=page, page_size=page_size, limit=limit, offset=offset, authorization=authorization)
@@ -2709,7 +2734,7 @@ def admin_update_settings(payload: SiteSettingsIn, authorization: str | None = H
         for key, value in data.items():
             if key == "smtp_password" and (value is None or value == "***"):
                 continue
-            if key == "email_enabled":
+            if key in {"email_enabled", "guest_access_restricted"}:
                 value = "1" if value else "0"
             set_setting(conn, key, value)
         updated = get_settings(conn)
@@ -2777,9 +2802,9 @@ def clean_slug(slug: str) -> str:
 
 @app.get("/api/channels")
 def list_channels(authorization: str | None = Header(default=None)):
-    require_user(current_user(authorization))
     init_db()
     with db() as conn:
+        require_user_if_guest_restricted(conn, authorization)
         rows = conn.execute(
             """
             SELECT ch.*, (SELECT COUNT(*) FROM channel_posts cp WHERE cp.channel_id=ch.id) AS post_count
@@ -2791,8 +2816,8 @@ def list_channels(authorization: str | None = Header(default=None)):
 
 @app.get("/api/channels/{id_or_slug}")
 def channel_detail(id_or_slug: str, authorization: str | None = Header(default=None)):
-    require_user(current_user(authorization))
     with db() as conn:
+        require_user_if_guest_restricted(conn, authorization)
         ch = get_channel(conn, id_or_slug)
         if not ch or not ch["enabled"]:
             raise HTTPException(status_code=404, detail="频道不存在")
@@ -2802,8 +2827,8 @@ def channel_detail(id_or_slug: str, authorization: str | None = Header(default=N
 
 @app.get("/api/channels/{id_or_slug}/posts")
 def channel_posts(id_or_slug: str, authorization: str | None = Header(default=None)):
-    require_user(current_user(authorization))
     with db() as conn:
+        require_user_if_guest_restricted(conn, authorization)
         ch = get_channel(conn, id_or_slug)
         if not ch or not ch["enabled"]:
             raise HTTPException(status_code=404, detail="频道不存在")
@@ -2824,8 +2849,8 @@ def channel_posts(id_or_slug: str, authorization: str | None = Header(default=No
 
 @app.get("/api/channel_posts/{post_id}")
 def channel_post_detail(post_id: int, authorization: str | None = Header(default=None)):
-    require_user(current_user(authorization))
     with db() as conn:
+        require_user_if_guest_restricted(conn, authorization)
         conn.execute("UPDATE channel_posts SET views=views+1 WHERE id=?", (post_id,))
         row = conn.execute(
             """
