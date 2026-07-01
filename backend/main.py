@@ -621,8 +621,8 @@ def init_db() -> None:
                 (product["title"], product["desc"], product["price"], -1, ProductCategory.THEME_DRESSUP.value, product["icon"], 1, payload_json, now(), now(), product["title"], ProductCategory.THEME_DRESSUP.value),
             )
             conn.execute(
-                "UPDATE market_items SET description=?, price=?, stock=-1, category=?, cover_icon=?, payload_json=?, enabled=1, updated_at=? WHERE title=?",
-                (product["desc"], product["price"], ProductCategory.THEME_DRESSUP.value, product["icon"], payload_json, now(), product["title"]),
+                "UPDATE market_items SET description=?, category=?, cover_icon=?, payload_json=?, updated_at=? WHERE title=?",
+                (product["desc"], ProductCategory.THEME_DRESSUP.value, product["icon"], payload_json, now(), product["title"]),
             )
         conn.execute("UPDATE users SET avatar_border_style=? WHERE COALESCE(avatar_border_style,'')=''", (DEFAULT_AVATAR_BORDER_STYLE,))
         conn.execute("UPDATE market_items SET description=?, payload_json=?, category=?, cover_icon=?, price=CASE WHEN COALESCE(price,0)<=0 THEN 188 ELSE price END, updated_at=? WHERE title='改名卡'", ("兑换后提交想修改的新昵称，管理员审核后处理。", '{"request_type":"rename"}', ProductCategory.MEMBER_BENEFIT.value, 'fa-id-card', now()))

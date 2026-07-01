@@ -1330,7 +1330,9 @@ function AdminMarket({ data, draft, setDraft, run }) {
   const directCats = new Set(['MEMBER_BENEFIT','THEME_DRESSUP','RARE_PERK'])
   const currentSystemProducts = systemProducts[item.category] || []
   const selectedSystemProduct = currentSystemProducts.find(p => p.title === item.title) || currentSystemProducts[0]
-  const normalizeItem = src => directCats.has(src.category) && selectedSystemProduct ? { ...src, ...selectedSystemProduct } : { ...src, cover_icon: src.cover_icon || categoryIcons[src.category] || 'fa-gift', payload_json: src.payload_json || '{}' }
+  const normalizeItem = src => directCats.has(src.category) && selectedSystemProduct
+    ? { ...src, title: selectedSystemProduct.title, description: selectedSystemProduct.description, cover_icon: selectedSystemProduct.cover_icon || categoryIcons[src.category] || 'fa-gift', payload_json: selectedSystemProduct.payload_json || '{}' }
+    : { ...src, cover_icon: src.cover_icon || categoryIcons[src.category] || 'fa-gift', payload_json: src.payload_json || '{}' }
   const save = () => {
     const payload = normalizeItem({ ...item, price:Number(item.price || 0), stock:Number(item.stock ?? -1), enabled:item.enabled !== false })
     return run(() => api(editing ? `/api/admin/market/items/${item.id}` : '/api/admin/market/products', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(payload) }).then(() => setDraft({ ...draft, marketItem: empty })))
