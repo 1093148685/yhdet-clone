@@ -1453,7 +1453,11 @@ def verify_captcha_if_enabled(conn: sqlite3.Connection, captcha_id: str | None, 
         raise HTTPException(status_code=400, detail="验证码不正确")
 
 
-def http_json(url: str, *, method: str = "GET", data: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
+def oauth_error_redirect(message: str) -> RedirectResponse:
+    return RedirectResponse(f"/login?oauth_error={urllib.parse.quote(message or '第三方登录失败')}")
+
+
+def http_json(url: str, *, method: str = "GET", data: dict[str, Any] | None = None, headers: dict[str, str] | None = None, raise_http: bool = True) -> dict[str, Any]:
     body = None
     req_headers = dict(headers or {})
     if data is not None:
@@ -1469,13 +1473,37 @@ def http_json(url: str, *, method: str = "GET", data: dict[str, Any] | None = No
             parsed = json.loads(raw)
         except Exception:
             parsed = {"error_description": raw or str(exc)}
-        raise HTTPException(status_code=400, detail=parsed.get("error_description") or parsed.get("error") or "第三方登录请求失败")
+        if raise_http:
+            raise HTTPException(status_code=400, detail=parsed.get("error_description") or parsed.get("message") or parsed.get("msg") or parsed.get("error") or "第三方登录请求失败")
+        parsed["_http_status"] = exc.code
+        return parsed
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"第三方登录服务暂时不可用：{exc}")
+        if raise_http:
+            raise HTTPException(status_code=502, detail=f"第三方登录服务暂时不可用：{exc}")
+        return {"error": str(exc), "_network_error": True}
     try:
         return json.loads(raw)
     except Exception:
-        raise HTTPException(status_code=502, detail="第三方登录返回格式异常")
+        if raise_http:
+            raise HTTPException(status_code=502, detail="第三方登录返回格式异常")
+        return {"error": "第三方登录返回格式异常", "raw": raw[:500]}
+
+
+def first_oauth_success(candidates: list[tuple[str, str, dict[str, Any] | None, dict[str, str] | None]], *, need_access_token: bool = False) -> dict[str, Any]:
+    last_error = "第三方登录请求失败"
+    for url, method, data, headers in candidates:
+        result = http_json(url, method=method, data=data, headers=headers, raise_http=False)
+        if result.get("_network_error") or result.get("_http_status"):
+            last_error = str(result.get("error_description") or result.get("message") or result.get("msg") or result.get("error") or last_error)
+            continue
+        token_value = result.get("access_token")
+        if not token_value and isinstance(result.get("data"), dict):
+            token_value = result["data"].get("access_token")
+        if need_access_token and not str(token_value or ""):
+            last_error = str(result.get("error_description") or result.get("message") or result.get("msg") or result.get("error") or "第三方登录未返回 access_token")
+            continue
+        return result
+    raise HTTPException(status_code=400, detail=last_error)
 
 
 def qidao_user_fields(profile: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -1763,16 +1791,34 @@ def qidao_oauth_callback(request: Request, code: str | None = None, state: str |
         if not client_id or not client_secret:
             raise HTTPException(status_code=400, detail="栖岛 Client ID/Secret 未配置完整")
         redirect_uri = f"{base_url_from_request(request)}/api/oauth/qidao/callback"
-        token_data = http_json(
-            "https://api.qidao.tvcloud.top/oauth2/token",
-            method="POST",
-            data={"grant_type": "authorization_code", "client_id": client_id, "client_secret": client_secret, "code": code, "redirect_uri": redirect_uri},
-        )
-        access_token = str(token_data.get("access_token") or "")
-        if not access_token:
-            raise HTTPException(status_code=400, detail="栖岛未返回 access_token")
-        profile = http_json("https://api.qidao.tvcloud.top/oauth2/userinfo/oauth?" + urllib.parse.urlencode({"access_token": access_token}))
-        token, user = finish_qidao_login(conn, profile, token_data, request)
+        token_payload = {"grant_type": "authorization_code", "client_id": client_id, "client_secret": client_secret, "code": code, "redirect_uri": redirect_uri}
+        try:
+            token_data = first_oauth_success(
+                [
+                    ("https://api.qidao.tvcloud.top/oauth2/token", "POST", token_payload, None),
+                    ("https://api.qidao.tvcloud.top/oauth/token", "POST", token_payload, None),
+                    ("https://api.qidao.tvcloud.top/oauth/access_token", "POST", token_payload, None),
+                ],
+                need_access_token=True,
+            )
+            if isinstance(token_data.get("data"), dict) and not token_data.get("access_token"):
+                token_data = {**token_data, **token_data["data"]}
+            access_token = str(token_data.get("access_token") or "")
+            if not access_token:
+                raise HTTPException(status_code=400, detail="栖岛未返回 access_token")
+            profile = first_oauth_success(
+                [
+                    ("https://api.qidao.tvcloud.top/oauth2/userinfo/oauth?" + urllib.parse.urlencode({"access_token": access_token}), "GET", None, None),
+                    ("https://api.qidao.tvcloud.top/oauth2/userinfo?" + urllib.parse.urlencode({"access_token": access_token}), "GET", None, None),
+                    ("https://api.qidao.tvcloud.top/oauth/userinfo?" + urllib.parse.urlencode({"access_token": access_token}), "GET", None, None),
+                    ("https://api.qidao.tvcloud.top/userinfo", "GET", None, {"Authorization": f"Bearer {access_token}"}),
+                ]
+            )
+            token, user = finish_qidao_login(conn, profile, token_data, request)
+        except HTTPException as exc:
+            return oauth_error_redirect(str(exc.detail or "栖岛登录失败"))
+        except Exception as exc:
+            return oauth_error_redirect(f"栖岛登录失败：{exc}")
         redirect_to = row["redirect_to"] or "/"
     safe_user = json.dumps(public_user(user), ensure_ascii=False).replace("</", "<\\/")
     safe_token = json.dumps(token).replace("</", "<\\/")
