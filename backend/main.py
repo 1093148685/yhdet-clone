@@ -1085,6 +1085,18 @@ class CommentIn(BaseModel):
     reply_to_comment_id: int | None = None
 
 
+COMMENT_MIN_LENGTH = 16
+
+
+def normalize_comment_content(content: str) -> str:
+    text = (content or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="评论内容不能为空")
+    if len(text) < COMMENT_MIN_LENGTH:
+        raise HTTPException(status_code=400, detail=f"评论至少需要 {COMMENT_MIN_LENGTH} 个字")
+    return text
+
+
 class AdminUserIn(BaseModel):
     role: str | None = None
     role_label: str | None = None
@@ -1642,6 +1654,7 @@ def _record_comment_notification(conn: sqlite3.Connection, post: sqlite3.Row, ac
 @app.post("/api/posts/{post_id}/comments")
 async def add_comment(post_id: int, payload: CommentIn, authorization: str | None = Header(default=None)):
     user = require_user(current_user(authorization))
+    content = normalize_comment_content(payload.content)
     with db() as conn:
         exists = conn.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone()
         if not exists:
@@ -1651,10 +1664,10 @@ async def add_comment(post_id: int, payload: CommentIn, authorization: str | Non
             reply_exists = conn.execute("SELECT id FROM comments WHERE id=? AND post_id=?", (reply_to_comment_id, post_id)).fetchone()
             if not reply_exists:
                 raise HTTPException(status_code=400, detail="回复的评论不存在")
-        cur = conn.execute("INSERT INTO comments(post_id,user_id,content,reply_to_comment_id,created_at) VALUES(?,?,?,?,?)", (post_id, user["id"], payload.content.strip(), reply_to_comment_id, now()))
+        cur = conn.execute("INSERT INTO comments(post_id,user_id,content,reply_to_comment_id,created_at) VALUES(?,?,?,?,?)", (post_id, user["id"], content, reply_to_comment_id, now()))
         comment_id = cur.lastrowid
         award_points(conn, user["id"], 3, "发表评论", "comment", comment_id)
-        _record_comment_notification(conn, exists, user, comment_id, payload.content.strip())
+        _record_comment_notification(conn, exists, user, comment_id, content)
         comment = fetch_comment_dict(conn, post_id, comment_id, user)
         comment_count = conn.execute("SELECT COUNT(*) FROM comments WHERE post_id=? AND COALESCE(deleted_at,'')=''", (post_id,)).fetchone()[0]
         current_points = refresh_user_points(conn, user["id"])
@@ -1665,9 +1678,7 @@ async def add_comment(post_id: int, payload: CommentIn, authorization: str | Non
 @app.patch("/api/posts/{post_id}/comments/{comment_id}")
 async def update_comment(post_id: int, comment_id: int, payload: CommentIn, authorization: str | None = Header(default=None)):
     user = require_user(current_user(authorization))
-    content = payload.content.strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="评论内容不能为空")
+    content = normalize_comment_content(payload.content)
     with db() as conn:
         row = conn.execute("SELECT * FROM comments WHERE id=? AND post_id=?", (comment_id, post_id)).fetchone()
         if not row:
@@ -2917,11 +2928,12 @@ def channel_post_detail(post_id: int, authorization: str | None = Header(default
 @app.post("/api/channel_posts/{post_id}/comments")
 def add_channel_comment(post_id: int, payload: CommentIn, authorization: str | None = Header(default=None)):
     user = require_user(current_user(authorization))
+    content = normalize_comment_content(payload.content)
     with db() as conn:
         exists = conn.execute("SELECT id FROM channel_posts WHERE id=?", (post_id,)).fetchone()
         if not exists:
             raise HTTPException(status_code=404, detail="频道内容不存在")
-        cur = conn.execute("INSERT INTO channel_comments(channel_post_id,user_id,content,created_at) VALUES(?,?,?,?)", (post_id, user["id"], payload.content.strip(), now()))
+        cur = conn.execute("INSERT INTO channel_comments(channel_post_id,user_id,content,created_at) VALUES(?,?,?,?)", (post_id, user["id"], content, now()))
         comment_id = cur.lastrowid
         row = conn.execute(
             "SELECT cc.*, u.username, u.avatar, u.avatar_border_style, u.role, u.role_label FROM channel_comments cc JOIN users u ON u.id=cc.user_id WHERE cc.id=?",

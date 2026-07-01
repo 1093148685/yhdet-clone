@@ -871,14 +871,18 @@ function CommentList({ comments = [], onReply, onEdit, onDelete, onJump }) {
 
 function CommentEditor({ me, mode = 'reply', editingComment, content, setContent, replyingTo, onCancelReply, onCancelEdit, onJump, onSubmit, sending, err, onTyping, onTypingEnd }) {
   const [preview, setPreview] = useState(false)
+  const trimmedLength = content.trim().length
+  const minLength = 16
+  const tooShort = trimmedLength > 0 && trimmedLength < minLength
   if (!me) return <div className="comment-login"><p>登录后即可发表回复</p><a className="btn btn-primary" href="/login"><i className="fas fa-right-to-bracket" /> 去登录</a></div>
   return <form className="comment-editor" onSubmit={onSubmit}>
     {err && <div className="alert alert-error">{err}</div>}
     {mode === 'reply' && <ReplyIndicator comment={replyingTo} onCancel={onCancelReply} onJump={onJump} />}
     {mode === 'edit' && <div className="reply-indicator edit-mode-indicator"><span><i className="fas fa-pen" /> 正在编辑评论 #{editingComment?.id}</span>{onCancelEdit && <button type="button" className="reply-cancel" onClick={onCancelEdit}>取消编辑</button>}</div>}
     <div className="editor-toolbar"><span><i className="fab fa-markdown" /> 支持 Markdown</span><button type="button" onClick={() => setPreview(!preview)}>{preview ? '继续编辑' : '实时预览'}</button></div>
-    {preview ? <div className="editor-preview"><MarkdownRenderer content={content || '预览会显示在这里'} compact /></div> : <textarea className="form-textarea comment-textarea" required maxLength={2000} value={content} onChange={e => { setContent(e.target.value); onTyping?.() }} onBlur={() => onTypingEnd?.()} onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') onSubmit(e) }} placeholder={mode === 'edit' ? '编辑评论，Ctrl + Enter 保存' : replyingTo ? `回复 @${replyingTo.author}，Ctrl + Enter 发送` : '写下你的回复，Ctrl + Enter 发送'} />}
-    <div className="editor-actions"><span>{content.length}/2000</span><button className="btn btn-primary" disabled={sending || !content.trim()}><i className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} /> {sending ? '处理中' : mode === 'edit' ? '保存修改' : '发表回复'}</button></div>
+    {preview ? <div className="editor-preview"><MarkdownRenderer content={content || '预览会显示在这里'} compact /></div> : <textarea className="form-textarea comment-textarea" required minLength={minLength} maxLength={2000} value={content} onChange={e => { setContent(e.target.value); onTyping?.() }} onBlur={() => onTypingEnd?.()} onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') onSubmit(e) }} placeholder={mode === 'edit' ? '编辑评论，至少 16 个字，Ctrl + Enter 保存' : replyingTo ? `回复 @${replyingTo.author}，至少 16 个字，Ctrl + Enter 发送` : '写下你的回复，至少 16 个字，Ctrl + Enter 发送'} />}
+    {tooShort && <div className="editor-minlength-hint"><i className="fas fa-circle-info" /> 还差 {minLength - trimmedLength} 个字，评论至少需要 {minLength} 个字</div>}
+    <div className="editor-actions"><span className={tooShort ? 'too-short' : ''}>{content.length}/2000 · 最少 {minLength} 字</span><button className="btn btn-primary" disabled={sending || trimmedLength < minLength}><i className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} /> {sending ? '处理中' : mode === 'edit' ? '保存修改' : '发表回复'}</button></div>
   </form>
 }
 
@@ -965,6 +969,7 @@ function PostDetail({ id, me }) {
     if (!editingComment) return
     const nextContent = content.trim()
     if (!nextContent) return setErr('评论内容不能为空')
+    if (nextContent.length < 16) return setErr('评论至少需要 16 个字')
     setSending(true); setErr('')
     try {
       const r = await api(`/api/posts/${id}/comments/${editingComment.id}`, { method: 'PATCH', body: JSON.stringify({ content: nextContent, reply_to_comment_id: editingComment.reply_to_comment_id || null }) })
@@ -990,6 +995,7 @@ function PostDetail({ id, me }) {
     e.preventDefault(); setErr('')
     if (composerMode === 'edit') return saveEditComment()
     if (!content.trim()) return setErr('评论内容不能为空')
+    if (content.trim().length < 16) return setErr('评论至少需要 16 个字')
     setSending(true)
     try {
       const r = await api(`/api/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content: content.trim(), reply_to_comment_id: replyingTo?.id || null }) })
@@ -1664,7 +1670,8 @@ function ChannelPostDetail({ id, me }) {
   const [sending, setSending] = useState(false)
   const load = () => api(`/api/channel_posts/${id}`).then(d => { setData(d); document.title = `${d.post.title} - 频道` }).catch(e => setErr(e.message))
   useEffect(() => { let alive = true; setData(null); setErr(''); api(`/api/channel_posts/${id}`).then(d => { if (alive) { setData(d); document.title = `${d.post.title} - 频道` } }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
-  async function comment(e) { e.preventDefault(); setErr(''); if (!content.trim()) return setErr('评论内容不能为空'); setSending(true); try { const r = await api(`/api/channel_posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content: content.trim() }) }); if (r.comment) setData(d => d ? { ...d, comments: [...(d.comments || []), r.comment], post: { ...d.post, comments: Number(d.post.comments || 0) + 1 } } : d); setContent(''); notify('评论已发表', 'success') } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) } }
+  async function comment(e) { e.preventDefault(); setErr(''); if (!content.trim()) return setErr('评论内容不能为空')
+    if (content.trim().length < 16) return setErr('评论至少需要 16 个字'); setSending(true); try { const r = await api(`/api/channel_posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content: content.trim() }) }); if (r.comment) setData(d => d ? { ...d, comments: [...(d.comments || []), r.comment], post: { ...d.post, comments: Number(d.post.comments || 0) + 1 } } : d); setContent(''); notify('评论已发表', 'success') } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) } }
   if (err && !data) return <><PageChrome /><div className="main-content"><div className="alert alert-error">{err}</div></div></>
   if (!data) return <DetailSkeleton />
   const p = data.post

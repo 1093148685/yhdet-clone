@@ -931,11 +931,11 @@
 .floating-reply-console > * { pointer-events: auto; }
 .floating-reply-panel {
   overflow: hidden;
-  border: 1px solid rgba(255,255,255,.12);
+  border: 1px solid #e5edf7;
   border-radius: 24px;
-  background: rgba(24,24,27,.92);
-  color: #e4e4e7;
-  box-shadow: 0 24px 80px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.04) inset;
+  background: rgba(255,255,255,.96);
+  color: var(--text-primary);
+  box-shadow: 0 24px 80px rgba(15,23,42,.18), 0 0 0 1px rgba(255,255,255,.7) inset;
   backdrop-filter: blur(18px);
 }
 .floating-reply-head {
@@ -944,10 +944,11 @@
   justify-content: space-between;
   gap: 14px;
   padding: 13px 16px;
-  border-bottom: 1px solid rgba(255,255,255,.09);
+  border-bottom: 1px solid #edf2f7;
+  background: rgba(248,250,252,.9);
 }
-.floating-reply-head span { display: block; color: #71717a; font-size: .74rem; margin-bottom: 2px; }
-.floating-reply-head strong { display: block; color: #f4f4f5; font-size: .92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.floating-reply-head span { display: block; color: #94a3b8; font-size: .74rem; margin-bottom: 2px; }
+.floating-reply-head strong { display: block; color: #334155; font-size: .92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .floating-reply-actions { display: inline-flex; align-items: center; gap: 4px; }
 .floating-reply-actions button {
   width: 32px;
@@ -958,28 +959,28 @@
   border: 0;
   border-radius: 999px;
   background: transparent;
-  color: #a1a1aa;
+  color: #64748b;
   cursor: pointer;
   transition: color .16s ease, background .16s ease, transform .16s ease;
 }
-.floating-reply-actions button:hover { color: #a5b4fc; background: rgba(255,255,255,.06); }
-.floating-reply-actions button:last-child:hover { color: #fca5a5; background: rgba(239,68,68,.12); }
+.floating-reply-actions button:hover { color: #2563eb; background: #eff6ff; }
+.floating-reply-actions button:last-child:hover { color: #dc2626; background: #fef2f2; }
 .floating-reply-actions button:active { transform: scale(.94); }
 .floating-reply-body { padding: 14px; }
 .floating-reply-body .comment-editor { gap: 10px; }
 .floating-reply-body .alert-error { margin: 0; }
 .floating-reply-body .reply-indicator,
 .floating-reply-body .editor-preview {
-  border-color: rgba(255,255,255,.1);
-  background: rgba(0,0,0,.22);
-  color: #d4d4d8;
+  border-color: #dbeafe;
+  background: #f8fafc;
+  color: #334155;
 }
-.floating-reply-body .reply-indicator button { color: #a5b4fc; }
-.floating-reply-body .editor-toolbar { color: #a1a1aa; }
+.floating-reply-body .reply-indicator button { color: #2563eb; }
+.floating-reply-body .editor-toolbar { color: #64748b; }
 .floating-reply-body .editor-toolbar button {
-  border-color: rgba(129,140,248,.25);
-  background: rgba(99,102,241,.12);
-  color: #c7d2fe;
+  border-color: #dbeafe;
+  background: #eff6ff;
+  color: #2563eb;
 }
 .floating-reply-body .comment-textarea {
   min-height: 118px;
@@ -992,6 +993,8 @@
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--primary-light);
 }
+.editor-minlength-hint { color: #b45309; font-size: .8rem; display: flex; align-items: center; gap: 6px; }
+.editor-actions .too-short { color: #b45309; }
 .reply-capsule {
   width: min(620px, calc(100vw - 24px));
   min-height: 48px;
