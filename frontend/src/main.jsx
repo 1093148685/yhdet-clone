@@ -890,9 +890,8 @@ function PostDetail({ id, me }) {
   const [composerMode, setComposerMode] = useState('reply')
   const [err, setErr] = useState('')
   const [sending, setSending] = useState(false)
-  const [editorOpen, setEditorOpen] = useState(false)
+  const [replyStatus, setReplyStatus] = useState('hidden')
   const [detailReady, setDetailReady] = useState(false)
-  const editorRef = useRef(null)
   const load = (silent = false) => api(`/api/posts/${id}`).then(d => { setData(d); document.title = `${d.post.title} - 泓聊社区` }).catch(e => { if (!silent) setErr(e.message) })
   const handleTopicEvent = useMemo(() => msg => {
     if (!msg?.type?.startsWith('comment_')) return
@@ -919,7 +918,7 @@ function PostDetail({ id, me }) {
   useEffect(() => {
     if (composerMode === 'edit' && draftKey) localStorage.setItem(draftKey, content)
   }, [composerMode, draftKey, content])
-  useEffect(() => { let alive = true; setData(null); setDetailReady(false); setErr(''); setReplyingTo(null); setEditingComment(null); setComposerMode('reply'); setEditorOpen(false); const started = Date.now(); api(`/api/posts/${id}`).then(d => { if (!alive) return; const wait = Math.max(260 - (Date.now() - started), 0); setTimeout(() => { if (alive) { setData(d); setDetailReady(true); document.title = `${d.post.title} - 泓聊社区` } }, wait) }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
+  useEffect(() => { let alive = true; setData(null); setDetailReady(false); setErr(''); setReplyingTo(null); setEditingComment(null); setComposerMode('reply'); setReplyStatus('hidden'); const started = Date.now(); api(`/api/posts/${id}`).then(d => { if (!alive) return; const wait = Math.max(260 - (Date.now() - started), 0); setTimeout(() => { if (alive) { setData(d); setDetailReady(true); document.title = `${d.post.title} - 泓聊社区` } }, wait) }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
   function highlightComment(commentId) {
     const el = document.getElementById(`comment-${commentId}`)
     if (!el) return
@@ -930,17 +929,32 @@ function PostDetail({ id, me }) {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     setTimeout(() => el.classList.remove('comment-focus'), 2200)
   }
-  function startReply(comment) {
+  function startReply(comment = null) {
+    if (!me) return navigate('/login')
     if (comment?.quote_only && comment.jump_to_id) return highlightComment(comment.jump_to_id)
     if (composerMode === 'edit' && content !== (editingComment?.content || '') && !confirm('当前编辑内容还没保存，确定切换到回复吗？')) return
-    setComposerMode('reply'); setEditingComment(null); setReplyingTo(comment); setEditorOpen(true); setContent(''); setTimeout(() => editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 20)
+    setComposerMode('reply'); setEditingComment(null); setReplyingTo(comment); setContent(''); setReplyStatus('expanded')
   }
   function startEdit(comment) {
+    if (!me) return navigate('/login')
     if (comment.deleted) return notify('已删除的评论不能编辑', 'error')
     if (composerMode === 'edit' && editingComment?.id !== comment.id && content !== (editingComment?.content || '') && !confirm('当前编辑内容还没保存，确定切换到另一条评论吗？')) return
-    setComposerMode('edit'); setReplyingTo(null); setEditingComment(comment); setEditorOpen(true)
+    setComposerMode('edit'); setReplyingTo(null); setEditingComment(comment); setReplyStatus('expanded')
     setContent(localStorage.getItem(`yhdet_edit_draft_${comment.id}`) || comment.content || '')
-    setTimeout(() => editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 20)
+  }
+  function collapseReplyConsole() {
+    sendTypingEnd()
+    if (editingComment?.id) sendEditingEnd(editingComment.id)
+    setReplyStatus('collapsed')
+  }
+  function closeReplyConsole() {
+    sendTypingEnd()
+    if (editingComment?.id) sendEditingEnd(editingComment.id)
+    setReplyStatus('hidden')
+    setReplyingTo(null)
+    setEditingComment(null)
+    setComposerMode('reply')
+    setContent('')
   }
   useEffect(() => {
     if (!data || !location.hash.startsWith('#comment-')) return
@@ -958,7 +972,7 @@ function PostDetail({ id, me }) {
       sendEditingEnd(editingComment.id)
       const editedId = editingComment.id
       if (r.comment) setData(d => d ? { ...d, comments: (d.comments || []).map(c => c.id === r.comment.id ? r.comment : c) } : d)
-      setContent(''); setEditingComment(null); setComposerMode('reply'); setEditorOpen(false); notify('修改已保存', 'success'); setTimeout(() => highlightComment(editedId), 80)
+      setContent(''); setEditingComment(null); setComposerMode('reply'); setReplyStatus('hidden'); notify('修改已保存', 'success'); setTimeout(() => highlightComment(editedId), 80)
     } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) }
   }
   async function deleteComment(comment) {
@@ -983,7 +997,7 @@ function PostDetail({ id, me }) {
       const newComment = r.comment
       if (newComment) setData(d => d ? { ...d, comments: [...(d.comments || []).filter(c => c.id !== newComment.id), newComment], post: { ...d.post, comments: r.comment_count ?? Number(d.post.comments || 0) + 1 } } : d)
       if (r.current_points !== undefined) mergeStoredUser({ available_points: r.current_points })
-      setContent(''); setReplyingTo(null); setEditorOpen(false); notify('回复已发表', 'success'); history.replaceState(null, '', location.pathname)
+      setContent(''); setReplyingTo(null); setReplyStatus('hidden'); notify('回复已发表', 'success'); history.replaceState(null, '', location.pathname)
     } catch (e) { setErr(e.message); notify(e.message, 'error') } finally { setSending(false) }
   }
   if (err && !data) return <><PageChrome /><div className="main-content"><div className="alert alert-error">{err}</div></div></>
@@ -1005,6 +1019,7 @@ function PostDetail({ id, me }) {
         </div>
       </div>
       <div className="card-body"><MarkdownRenderer content={p.content} /></div>
+      <button type="button" className="main-post-reply-trigger reply create" title={me ? '回复楼主' : '登录后回复'} aria-label={me ? '回复楼主' : '登录后回复'} onClick={() => startReply(null)}><i className="fas fa-reply" /></button>
     </div>
 
     <section className="card animate-fadeInUp reply-card forum-comments" style={{ animationDelay: '0.1s' }}>
@@ -1012,9 +1027,17 @@ function PostDetail({ id, me }) {
       <CommentList comments={data.comments} onReply={startReply} onEdit={startEdit} onDelete={deleteComment} onJump={highlightComment} />
     </section>
 
-    <div ref={editorRef} className={`comment-composer-dock ${editorOpen ? 'open' : 'collapsed'}`}>
-      {!editorOpen ? <button type="button" className="composer-toggle" onClick={() => { setComposerMode('reply'); setEditingComment(null); setReplyingTo(null); setContent(''); setEditorOpen(true); setTimeout(() => editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 20) }}><i className="fas fa-reply" /> {me ? '回复帖子' : '登录后回复'}</button> : <div className="card comment-editor-card"><div className="card-body"><div className="composer-head"><strong>{composerMode === 'edit' ? `编辑评论 #${editingComment?.id}` : replyingTo ? `回复 @${replyingTo.author}` : '回复帖子'}</strong><button type="button" onClick={() => { sendTypingEnd(); if (editingComment?.id) sendEditingEnd(editingComment.id); setEditorOpen(false); setReplyingTo(null); setEditingComment(null); setComposerMode('reply') }}><i className="fas fa-chevron-down" /> 收起</button></div>{replyingTo?.deleted && <div className="reply-deleted-note">你正在回复的评论已被删除。</div>}<CommentEditor me={me} mode={composerMode} editingComment={editingComment} content={content} setContent={setContent} replyingTo={replyingTo} onCancelReply={() => setReplyingTo(null)} onJump={highlightComment} onSubmit={comment} sending={sending} err={err} onTyping={sendTyping} onTypingEnd={sendTypingEnd} onCancelEdit={() => { if (editingComment?.id) sendEditingEnd(editingComment.id); setEditingComment(null); setComposerMode('reply'); setContent('') }} /></div></div>}
-    </div>
+    {replyStatus !== 'hidden' && createPortal(
+      <div className={`floating-reply-console ${replyStatus}`}>
+        {replyStatus === 'collapsed' ? <button type="button" className="reply-capsule" onClick={() => setReplyStatus('expanded')}>
+          <span className="reply-breathing-dot" />
+          <span className="reply-capsule-text">对 <b>@{composerMode === 'edit' ? `评论 #${editingComment?.id}` : replyingTo?.author || p.author || '楼主'}</b> 的回复已收起...</span>
+          <span className="reply-capsule-action">点击展开 <i className="fas fa-chevron-up" /></span>
+        </button> : <div className="floating-reply-panel">
+          <div className="floating-reply-head"><div><span>当前回复目标</span><strong>{composerMode === 'edit' ? `编辑评论 #${editingComment?.id}` : replyingTo ? `正在回复 @${replyingTo.author}` : `正在回复 @${p.author || '楼主'}`}</strong></div><div className="floating-reply-actions"><button type="button" title="收起" aria-label="收起" onClick={collapseReplyConsole}><i className="fas fa-chevron-down" /></button><button type="button" title="关闭" aria-label="关闭" onClick={closeReplyConsole}><i className="fas fa-xmark" /></button></div></div>
+          <div className="floating-reply-body">{replyingTo?.deleted && <div className="reply-deleted-note">你正在回复的评论已被删除。</div>}<CommentEditor me={me} mode={composerMode} editingComment={editingComment} content={content} setContent={setContent} replyingTo={replyingTo} onCancelReply={() => setReplyingTo(null)} onJump={highlightComment} onSubmit={comment} sending={sending} err={err} onTyping={sendTyping} onTypingEnd={sendTypingEnd} onCancelEdit={() => { if (editingComment?.id) sendEditingEnd(editingComment.id); setEditingComment(null); setComposerMode('reply'); setContent('') }} /></div>
+        </div>}
+      </div>, document.body)}
 
     <div className="back-home"><a className="btn btn-secondary" href="/"><i className="fas fa-arrow-left" /> 返回首页</a></div>
   </div></div></>
