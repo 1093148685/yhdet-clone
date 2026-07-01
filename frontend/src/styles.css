@@ -998,8 +998,8 @@
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--primary-light);
 }
-.editor-minlength-hint { color: #b45309; font-size: .8rem; display: flex; align-items: center; gap: 6px; }
-.editor-actions .too-short { color: #b45309; }
+.editor-minlength-hint { color: #64748b; font-size: .8rem; display: flex; align-items: center; gap: 6px; }
+.editor-actions .too-short { color: #64748b; }
 .reply-capsule {
   width: min(620px, calc(100vw - 24px));
   min-height: 48px;
