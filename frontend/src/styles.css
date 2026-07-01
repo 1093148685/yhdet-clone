@@ -376,6 +376,16 @@
 
         .post-meta-item { display: inline-flex; align-items: center; gap: 4px; }
         .post-avatar { width: 42px; height: 42px; border-radius: 50%; object-fit: cover; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); flex-shrink: 0; }
+        .avatar-ring { border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; transition: transform .5s ease, box-shadow .5s ease, background .5s ease; box-shadow: 0 1px 4px rgba(15,23,42,.12); }
+        .avatar-ring:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(15,23,42,.15); }
+        .avatar-ring-img { width: 100%; height: 100%; border-radius: 999px; border: 2px solid #fff; object-fit: cover; background: #fff; display: block; }
+        .avatar-ring-link { display: inline-flex; text-decoration: none; flex: 0 0 auto; }
+        .post-avatar-ring { width: 48px; height: 48px; }
+        .topic-avatar-ring { width: 48px; height: 48px; }
+        .profile-avatar-ring { box-shadow: 0 10px 30px rgba(15,23,42,.16); }
+        .user-card-avatar-ring { margin: 0 auto 8px; }
+        .presence-avatar-ring { margin-left: -7px; box-shadow: 0 1px 3px rgba(15,23,42,.08); }
+        .presence-avatar-ring:first-child { margin-left: 0; }
         .post-author-name { color: #4a90d9; text-decoration: none; font-weight: 500; }
         .username-red { color: #dc2626 !important; font-weight: 800 !important; }
         .username-red:hover { color: #b91c1c !important; }

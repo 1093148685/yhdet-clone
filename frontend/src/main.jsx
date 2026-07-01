@@ -23,6 +23,14 @@ function onAvatarError(e) {
     img.style.display = 'none'
   }
 }
+function avatarBorderStyle(user) { return user?.avatar_border_style || '#FFFFFF' }
+function AvatarRing({ user, src, alt = '头像', size = 48, className = '', imgClassName = '', href = '', title = '' }) {
+  const image = safeAvatar(src || user?.avatar)
+  const ring = <div className={`avatar-ring ${className}`} style={{ width:size, height:size, padding:3, background: avatarBorderStyle(user) }} title={title || user?.username || alt}>
+    <img src={image} alt={alt} className={`avatar-ring-img ${imgClassName}`} loading="lazy" decoding="async" onError={onAvatarError} />
+  </div>
+  return href ? <a href={href} className="avatar-ring-link">{ring}</a> : ring
+}
 function usernameClass(obj) { return obj?.display_flags?.red_username ? 'username-red' : '' }
 
 function currentRoute() {
@@ -200,6 +208,9 @@ function displayDate(s = '') {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 function orderStatusText(s = '') { return s === 'SUCCESS' ? '已完成' : s === 'PENDING' ? '待处理' : s === 'PENDING_AUDIT' ? '待审核' : s === 'REJECTED' ? '已拒绝/已退款' : s === 'FAILED' ? '失败' : s }
+function isAvatarBorderItem(item = {}) {
+  try { return JSON.parse(item.payload_json || '{}')?.effect === 'avatar_border_style' } catch { return /^头像颜色卡|^谷歌至尊四色环/.test(item.title || '') }
+}
 function decodeOrderNote(text = '') {
   if (!text) return ''
   try {
@@ -282,7 +293,7 @@ function SiteFooter({ site = defaultSite }) {
 function PostItem({ post }) {
   return <a href={`/post/${post.id}`} className="post-item" style={{ textDecoration: 'none', display: 'block' }} onMouseDown={e => e.currentTarget.classList.add('is-active')} onBlur={e => e.currentTarget.classList.remove('is-active')}>
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
-      <img src={safeAvatar(post.avatar)} alt="" className="post-avatar" loading="lazy" decoding="async" onError={onAvatarError} />
+      <AvatarRing user={post} src={post.avatar} size={48} className="post-avatar-ring" />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div className="post-title">{post.pinned && <span className="pin-badge"><i className="fas fa-thumbtack" /> 置顶</span>}{post.title}</div>
         <div className="post-preview">{htmlText(post.preview || post.content)}</div>
@@ -299,7 +310,7 @@ function Sidebar({ donors = [], notice = {} }) {
 }
 
 function UserResults({ users }) {
-  return <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-users" /> 用户搜索结果</h3></div><div className="card-body"><div className="user-grid">{users.length ? users.map(u => <a className="user-card" href={`/user/${u.id}`} key={u.id} style={{ textDecoration: 'none' }}><img className="user-card-avatar" loading="lazy" decoding="async" src={safeAvatar(u.avatar)} onError={onAvatarError} /><div className={`user-card-name ${usernameClass(u)}`}>{u.username}</div><div className="user-card-bio">{u.role_label || '社区用户'}</div></a>) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到用户</p></div>}</div></div></div>
+  return <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-users" /> 用户搜索结果</h3></div><div className="card-body"><div className="user-grid">{users.length ? users.map(u => <a className="user-card" href={`/user/${u.id}`} key={u.id} style={{ textDecoration: 'none' }}><AvatarRing user={u} src={u.avatar} size={62} className="user-card-avatar-ring" /><div className={`user-card-name ${usernameClass(u)}`}>{u.username}</div><div className="user-card-bio">{u.role_label || '社区用户'}</div></a>) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到用户</p></div>}</div></div></div>
 }
 
 function Home() {
@@ -623,7 +634,7 @@ function PresenceBar({ presence }) {
   const viewers = presence.viewers || []
   return <div className="presence-bar">
     <div className="presence-avatars" title={`${presence.online_count || 0} 人正在浏览`}>
-      {viewers.map(u => <img key={u.id} src={safeAvatar(u.avatar)} alt={u.username} onError={onAvatarError} />)}
+      {viewers.map(u => <AvatarRing key={u.id} user={u} src={u.avatar} size={24} className="presence-avatar-ring" title={u.username} />)}
       {presence.overflow > 0 && <span className="presence-more">+{presence.overflow}</span>}
     </div>
     <span className="presence-count"><i className="fas fa-circle" /> {presence.online_count || 0} 人正在浏览这个帖子</span>
@@ -641,7 +652,7 @@ function PresenceActivity({ presence }) {
   const action = typing.length && editing.length ? '正在协作' : typing.length ? '正在输入' : '正在编辑'
   return <div className="presence-activity">
     <div className="presence-avatars compact" title={unique.map(u => u.username).join('、')}>
-      {unique.slice(0, 5).map(u => <img key={u.id} src={safeAvatar(u.avatar)} alt={u.username} onError={onAvatarError} />)}
+      {unique.slice(0, 5).map(u => <AvatarRing key={u.id} user={u} src={u.avatar} size={24} className="presence-avatar-ring" title={u.username} />)}
       {unique.length > 5 && <span className="presence-more">+{unique.length - 5}</span>}
     </div>
     <span><span className="typing-dot" /> {names}{unique.length > 2 ? ` 等 ${unique.length} 人` : ''} {action}...</span>
@@ -743,7 +754,7 @@ function CommentCard({ comment, onReply, onEdit, onDelete, directReplies = [], o
     try { await onDelete(comment); notify('评论已删除', 'success') } finally { setBusy(false) }
   }
   return <article id={embedded ? undefined : `comment-${comment.id}`} className={`comment-card topic-post regular ${comment.deleted ? 'is-deleted' : ''} ${embedded ? 'reply-preview-card' : ''} ${menuOpen ? 'menu-active' : ''}`}>
-    <div className="topic-avatar"><a href={`/user/${comment.user_id || ''}`}><img className="avatar" src={safeAvatar(comment.avatar)} alt="头像" loading="lazy" decoding="async" onError={onAvatarError} /></a></div>
+    <div className="topic-avatar"><AvatarRing user={comment} src={comment.avatar} size={48} className="topic-avatar-ring" href={`/user/${comment.user_id || ''}`} /></div>
     <div className="comment-main topic-body">
       <div className="comment-head topic-meta-data"><div className="names"><span className="first"><a className={`comment-author ${usernameClass(comment)}`} href={`/user/${comment.user_id || ''}`}>{comment.author}</a></span>{comment.role && <span className="user-title">{comment.role}</span>}</div><div className="post-infos"><OutgoingReplyLink comment={comment} onJump={jump} /><time className="post-info">{relativeTime(comment.time)}</time>{comment.edited && <span className="edited-mark">已编辑 · {relativeTime(comment.updated_at)}</span>}</div></div>
       <div className="regular-contents">
@@ -890,7 +901,7 @@ function PostDetail({ id, me }) {
         <h2>{p.title}</h2>
         <div className="post-meta detail-meta">
           <div className="post-author">
-            <img className="post-avatar" loading="lazy" decoding="async" src={safeAvatar(p.avatar)} alt="头像" onError={onAvatarError} />
+            <AvatarRing user={p} src={p.avatar} size={48} className="post-avatar-ring" />
             <a className={`post-author-name ${usernameClass(p)}`} href={`/user/${p.user_id}`}>{p.author}</a>
             {p.role ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {p.role.includes('超级') ? p.role : p.role === '超管' ? '超级管理员' : p.role}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}
           </div>
@@ -1122,7 +1133,7 @@ function UserPage({ id, me, setMe }) {
   }
   return <><PageChrome /><div className="main-content"><div className="detail-wrap">
     <div className="card animate-fadeInUp user-profile-card">
-      <div className="card-body user-profile-body"><div className="profile-head-row"><div className="avatar-wrap"><img className="profile-avatar" loading="lazy" decoding="async" src={safeAvatar(u.avatar)} alt="头像" onError={onAvatarError} />{isMe && <AvatarUploader onDone={avatarDone} />}</div><div className="profile-title-block"><h2 className={`profile-name-with-badge ${usernameClass(u)}`}>{u.username}</h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div></div><ProfileStats stats={data.profile_stats} /></div>
+      <div className="card-body user-profile-body"><div className="profile-head-row"><div className="avatar-wrap"><AvatarRing user={u} src={u.avatar} size={108} className="profile-avatar-ring" />{isMe && <AvatarUploader onDone={avatarDone} />}</div><div className="profile-title-block"><h2 className={`profile-name-with-badge ${usernameClass(u)}`}>{u.username}</h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div></div><ProfileStats stats={data.profile_stats} /></div>
     </div>
     <div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-pen-nib" style={{ color: 'var(--primary)' }} /> TA 的帖子 <span className="mini-busy">{data.posts_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowPosts(!showPosts)}>{showPosts ? '折叠' : '展开'}</button></div>{showPosts && <div>{data.posts.length ? data.posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-feather-pointed" /><p>TA 还没有发表过帖子</p></div>}{data.posts_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={morePosts} disabled={loadingPosts}>{loadingPosts ? '加载中...' : '加载更多帖子'}</button></div>}</div>}</div>
     {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.08s' }}><div className="card-header fold-head"><h3><i className="fas fa-receipt" style={{ color: '#f59e0b' }} /> 我的兑换记录 <span className="mini-busy">{data.market_orders_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data.market_orders?.length ? data.market_orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}{data.market_orders_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreOrders} disabled={loadingOrders}>{loadingOrders ? '加载中...' : '加载更多兑换记录'}</button></div>}</div>}</div>}
@@ -1387,6 +1398,7 @@ function ExchangeModal({ item, balance, busy, onClose, onSubmit }) {
   if (!item) return null
   const type = item.title === '改名卡' ? 'rename' : (item.title === '头衔申请券' || item.title === '自定义头衔卡') ? 'title' : ''
   const isAudit = Boolean(type)
+  const isBorder = isAvatarBorderItem(item)
   const label = type === 'rename' ? '新用户名' : '期望头衔名称'
   const hint = type === 'rename' ? '必须以字母开头，只能包含字母、数字和下划线。' : '建议 2-12 个字，管理员审核后展示在个人资料和帖子旁。'
   const usernameOk = /^[a-zA-Z][a-zA-Z0-9_]*$/.test(value.trim())
@@ -1402,9 +1414,9 @@ function ExchangeModal({ item, balance, busy, onClose, onSubmit }) {
   return <div className="exchange-mask" role="dialog" aria-modal="true"><div className={`exchange-modal exchange-step-${step}`}>
     <button className="exchange-close" onClick={onClose} disabled={busy} aria-label="关闭"><i className="fas fa-xmark" /></button>
     <div className="exchange-icon"><i className={`fas ${step === 'done' ? 'fa-check' : item.cover_icon || 'fa-gift'}`} /></div>
-    {step === 'confirm' && <><h3>确认兑换「{item.title}」？</h3><p>将扣除 <b>{item.price}</b> 泓币，当前余额 {Number(balance || 0).toLocaleString()} 泓币。</p><div className="exchange-actions"><button className="btn btn-secondary" onClick={onClose}>取消</button><button className="btn btn-primary" onClick={() => isAudit ? setStep('form') : onSubmit(item)} disabled={busy || (balance || 0) < item.price}>{busy ? '提交中...' : '确认兑换'}</button></div></>}
+    {step === 'confirm' && <><h3>确认兑换「{item.title}」？</h3><p>将扣除 <b>{item.price}</b> 泓币，当前余额 {Number(balance || 0).toLocaleString()} 泓币。{isBorder && <><br />兑换后头像外环将立即生效。</>}</p><div className="exchange-actions"><button className="btn btn-secondary" onClick={onClose}>取消</button><button className="btn btn-primary" onClick={async () => { if (isAudit) return setStep('form'); await onSubmit(item); if (isBorder) setStep('done') }} disabled={busy || (balance || 0) < item.price}>{busy ? '提交中...' : '确认兑换'}</button></div></>}
     {step === 'form' && <><h3>{item.title}申请信息</h3><p>确认后会先扣除泓币，订单进入待审核；拒绝时系统自动退款。</p><label className="exchange-field"><span>{label}</span><input autoFocus className={`form-input ${localErr ? 'input-error' : ''}`} value={value} maxLength={32} onChange={e => { setValue(e.target.value); setLocalErr('') }} placeholder={type === 'rename' ? 'New_Name123' : '例如：社区共创者'} /></label><small className={type === 'rename' && value && !usernameOk ? 'field-error' : 'field-hint'}>{type === 'rename' && value && !usernameOk ? '用户名必须以字母开头，且只能包含字母、数字和下划线！' : hint}</small>{localErr && <div className="alert alert-error compact-alert">{localErr}</div>}<div className="exchange-actions"><button className="btn btn-secondary" onClick={() => setStep('confirm')} disabled={busy}>返回</button><button className="btn btn-primary" onClick={submit} disabled={!canSubmit}>{busy ? '提交中...' : '提交审核'}</button></div></>}
-    {step === 'done' && <><h3>申请已提交</h3><p>申请已提交，请等待管理员审核。</p><div className="exchange-actions"><button className="btn btn-primary" onClick={onClose}>知道了</button></div></>}
+    {step === 'done' && <><h3>{isBorder ? '头像环已生效' : '申请已提交'}</h3><p>{isBorder ? '头像外环已秒级生效，去个人主页和帖子里看看效果吧。' : '申请已提交，请等待管理员审核。'}</p><div className="exchange-actions"><button className="btn btn-primary" onClick={onClose}>知道了</button></div></>}
   </div></div>
 }
 
@@ -1418,8 +1430,9 @@ function MarketPage({ me }) {
   useEffect(() => { document.title = '泓市场 - 泓聊社区'; setData(null); setErr(''); load() }, [])
   async function buy(item, auditValue = '') {
     const isAuditItem = item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡'
+    const isBorderItem = isAvatarBorderItem(item)
     const body = { item_id: item.id }
-    if (!isAuditItem && item.category === 'PERIPHERAL_PHYSICAL') {
+    if (!isAuditItem && !isBorderItem && item.category === 'PERIPHERAL_PHYSICAL') {
       const shipping_name = prompt('收货人姓名：', '')
       if (!shipping_name?.trim()) return
       const shipping_phone = prompt('联系电话：', '')
@@ -1430,10 +1443,11 @@ function MarketPage({ me }) {
     }
     setBusy(item.id); setErr('')
     try {
-      const endpoint = isAuditItem ? '/api/market/exchange' : '/api/market/buy'
+      const endpoint = isAuditItem ? '/api/market/exchange' : (isBorderItem ? '/api/market/exchange/border' : '/api/market/buy')
       const r = await api(endpoint, { method:'POST', body: JSON.stringify(isAuditItem ? { item_id:item.id, value:auditValue } : body) })
-      notify(isAuditItem ? '申请已提交，请等待管理员审核' : (r.status === 'PENDING' ? '兑换成功，等待管理员处理' : '兑换成功'), 'success')
+      notify(isAuditItem ? '申请已提交，请等待管理员审核' : (isBorderItem ? '头像环已生效' : (r.status === 'PENDING' ? '兑换成功，等待管理员处理' : '兑换成功')), 'success')
       setData(d => ({ ...d, balance: r.balance }))
+      if (r.user) { localStorage.setItem('yhdet_user', JSON.stringify(r.user)); window.dispatchEvent(new Event('storage')) }
       load()
       return r
     } catch (e) {
@@ -1447,7 +1461,7 @@ function MarketPage({ me }) {
   }
   if (!me) return <><PageChrome /><div className="main-content"><div className="alert alert-info">请先 <a href="/login">登录</a> 后进入泓市场</div></div></>
   if (!data && !err) return <HomeSkeleton />
-  return <><PageChrome /><div className="main-content"><div className="market-hero card animate-fadeInUp"><div className="card-body"><span className="channel-pill">泓市场</span><h1>{Number(data?.balance || 0).toLocaleString()} <small>泓币</small></h1><p>发帖和评论获得泓币，可兑换社区权益。</p><button className="btn btn-secondary" onClick={checkin}><i className="fas fa-calendar-check" /> 每日签到</button><div className="market-rules">{(data?.rules || []).map(x => <span key={x}>{x}</span>)}</div></div></div>{err && <div className="alert alert-error">{err}</div>}<div className="market-grid">{data?.items?.map(item => <div className="market-card card" key={item.id}><div className="market-icon"><i className={`fas ${item.cover_icon || 'fa-gift'}`} /></div><div className="market-card-body"><h3>{item.title}</h3><p>{item.description}</p><div className="market-meta"><b>{item.price} 泓币</b><span>{item.stock < 0 ? '不限量' : `库存 ${item.stock}`}</span></div><button className="btn btn-primary" disabled={busy === item.id || item.stock === 0 || (data.balance || 0) < item.price} onClick={() => setActiveItem(item)}><i className={`fas ${busy === item.id ? 'fa-spinner fa-spin' : 'fa-bag-shopping'}`} /> {(data.balance || 0) < item.price ? '泓币不足' : item.stock === 0 ? '已售罄' : '兑换'}</button></div></div>)}</div><div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-receipt" /> 我的兑换记录</h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data?.orders?.length ? data.orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}</div>}</div></div><ExchangeModal item={activeItem} balance={data?.balance || 0} busy={Boolean(busy)} onClose={() => setActiveItem(null)} onSubmit={async (item, value) => { await buy(item, value); if (!(item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡')) setActiveItem(null) }} /></>
+  return <><PageChrome /><div className="main-content"><div className="market-hero card animate-fadeInUp"><div className="card-body"><span className="channel-pill">泓市场</span><h1>{Number(data?.balance || 0).toLocaleString()} <small>泓币</small></h1><p>发帖和评论获得泓币，可兑换社区权益。</p><button className="btn btn-secondary" onClick={checkin}><i className="fas fa-calendar-check" /> 每日签到</button><div className="market-rules">{(data?.rules || []).map(x => <span key={x}>{x}</span>)}</div></div></div>{err && <div className="alert alert-error">{err}</div>}<div className="market-grid">{data?.items?.map(item => <div className="market-card card" key={item.id}><div className="market-icon"><i className={`fas ${item.cover_icon || 'fa-gift'}`} /></div><div className="market-card-body"><h3>{item.title}</h3><p>{item.description}</p><div className="market-meta"><b>{item.price} 泓币</b><span>{item.stock < 0 ? '不限量' : `库存 ${item.stock}`}</span></div><button className="btn btn-primary" disabled={busy === item.id || item.stock === 0 || (data.balance || 0) < item.price} onClick={() => setActiveItem(item)}><i className={`fas ${busy === item.id ? 'fa-spinner fa-spin' : 'fa-bag-shopping'}`} /> {(data.balance || 0) < item.price ? '泓币不足' : item.stock === 0 ? '已售罄' : '兑换'}</button></div></div>)}</div><div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-receipt" /> 我的兑换记录</h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data?.orders?.length ? data.orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>暂无兑换记录</p></div>}</div>}</div></div><ExchangeModal item={activeItem} balance={data?.balance || 0} busy={Boolean(busy)} onClose={() => setActiveItem(null)} onSubmit={async (item, value) => { await buy(item, value); if (!(item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡' || isAvatarBorderItem(item))) setActiveItem(null) }} /></>
 }
 
 function ChannelsPage() {
@@ -1503,7 +1517,7 @@ function ChannelPostDetail({ id, me }) {
   const p = data.post
   return <><PageChrome /><div className="main-content"><div className="detail-wrap">
     <div className="card animate-fadeInUp post-detail-card"><div className="card-header post-detail-header"><span className="channel-pill">{p.channel_name}</span><h2>{p.title}</h2><div className="post-meta detail-meta"><div className="post-meta-item"><i className="fas fa-user-shield" /> {p.author_name || '管理员'}</div><div className="post-meta-item"><i className="far fa-clock" /> {relativeTime(p.time)}</div><div className="post-meta-item detail-counts"><i className="far fa-comment" /> {data.comments.length || 0}<span className="meta-split">|</span><i className="far fa-eye" /> {p.views || 0}</div></div></div><div className="card-body"><div className="markdown-body">{renderContent(p.content)}</div>{p.external_url && <a className="source-link" href={p.external_url} target="_blank" rel="noreferrer"><i className="fas fa-arrow-up-right-from-square" /> {sourceLinkLabel(p.external_url)}</a>}</div></div>
-    <div className="card animate-fadeInUp reply-card"><div className="card-header"><h3><i className="fas fa-comments" /> 评论 ({data.comments.length})</h3></div><div>{data.comments.length ? data.comments.map(c => <div className="post-item reply-item" key={c.id}><div className="reply-row"><img className="post-avatar" loading="lazy" decoding="async" src={safeAvatar(c.avatar)} alt="头像" onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><a className="post-author-name" href={`/user/${c.user_id || ''}`}>{c.author}</a><span><i className="far fa-clock" /> {relativeTime(c.time)}</span></div><div className="markdown-body reply-content"><p>{c.content}</p></div></div></div></div>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>暂无评论</p></div>}</div></div>
+    <div className="card animate-fadeInUp reply-card"><div className="card-header"><h3><i className="fas fa-comments" /> 评论 ({data.comments.length})</h3></div><div>{data.comments.length ? data.comments.map(c => <div className="post-item reply-item" key={c.id}><div className="reply-row"><AvatarRing user={c} src={c.avatar} size={48} className="post-avatar-ring" /><div className="reply-main"><div className="reply-head"><a className="post-author-name" href={`/user/${c.user_id || ''}`}>{c.author}</a><span><i className="far fa-clock" /> {relativeTime(c.time)}</span></div><div className="markdown-body reply-content"><p>{c.content}</p></div></div></div></div>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>暂无评论</p></div>}</div></div>
     <div className="card"><div className="card-body reply-form-body">{err && <div className="alert alert-error">{err}</div>}{me ? <form onSubmit={comment}><textarea className="form-textarea" required maxLength={2000} value={content} onChange={e => setContent(e.target.value)} placeholder="写下你的评论" /><button className="btn btn-primary" style={{ marginTop: 10 }} disabled={sending}><i className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} /> {sending ? '发送中' : '发表评论'}</button></form> : <><p>登录后即可评论</p><a className="btn btn-primary" href="/login"><i className="fas fa-right-to-bracket" /> 去登录</a></>}</div></div>
     <div className="back-home"><a className="btn btn-secondary" href={`/channels/${p.channel_slug}`}><i className="fas fa-arrow-left" /> 返回频道</a></div>
   </div></div></>
