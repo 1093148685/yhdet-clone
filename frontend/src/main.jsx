@@ -496,11 +496,25 @@ function Home() {
   return <><SiteStats stats={data.stats} /><LedBanner banners={data.banners} /><div className="main-content"><SearchBox onSearch={onSearch} searching={searching} initialQuery={query} initialType={searchTypeRef.current} />{err && <div className="alert alert-error">{err}</div>}<div className="home-layout"><div>{users ? <UserResults users={users} hasMore={usersHasMore} loadingMore={usersLoadingMore} onMore={loadMoreUsers} /> : <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-fire" style={{ color: 'var(--secondary)' }} /> 最新帖子</h3>{searching && <span className="mini-busy">刷新中</span>}</div><div>{searching && posts.length === 0 ? <PostListSkeleton count={5} /> : posts.length ? posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到帖子</p></div>}{posts.length > 0 && <div className="infinite-loader">{loadingMore ? <><i className="fas fa-spinner fa-spin" /> 正在加载下一页...</> : hasMore ? '滑到底部自动加载更多' : '已经到底了'}</div>}</div></div>}</div><Sidebar donors={data.donors} notice={data.notice} /></div></div></>
 }
 
-function CaptchaBox({ value, onChange }) {
+function CaptchaBox({ value, onChange, captchaId, onChallenge }) {
   const [code, setCode] = useState('')
+  const [loading, setLoading] = useState(false)
   const canvasRef = React.useRef(null)
-  const gen = () => setCode(Math.random().toString(36).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5).padEnd(5, '8'))
-  useEffect(gen, [])
+  const gen = async () => {
+    setLoading(true)
+    try {
+      const res = await api('/api/captcha', { method: 'POST' })
+      setCode(res.code || '')
+      onChange('')
+      onChallenge?.(res.id || '')
+    } catch (e) {
+      setCode('ERROR')
+      onChallenge?.('')
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { gen() }, [])
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -522,14 +536,14 @@ function CaptchaBox({ value, onChange }) {
       <input type="text" className="form-input captcha-input" placeholder="请输入验证码" required maxLength={5} value={value} onChange={e => onChange(e.target.value)} />
       <canvas ref={canvasRef} className="captcha-canvas" onClick={gen} title="点击刷新验证码" />
     </div>
-    <p className="captcha-hint">点击图片刷新</p>
+    <p className="captcha-hint">{loading ? '正在刷新...' : '点击图片刷新'}{captchaId ? '' : '，未获取到请再点一次'}</p>
   </div>
 }
 
 function AuthPage({ mode, setMe, site = defaultSite }) {
   const isLogin = mode === 'login'
   useEffect(() => { document.title = `${isLogin ? '登录' : '注册'} - ${(site.site_name || '泓聊社区')}` }, [isLogin, site.site_name])
-  const [form, setForm] = useState({ username: '', email: '', email_code: '', password: '', captcha: '' })
+  const [form, setForm] = useState({ username: '', email: '', email_code: '', password: '', captcha_id: '', captcha: '' })
   const [err, setErr] = useState('')
   const [hint, setHint] = useState('')
   const [hintColor, setHintColor] = useState('#aaa')
@@ -541,6 +555,10 @@ function AuthPage({ mode, setMe, site = defaultSite }) {
     const t = setInterval(() => setCountdown(v => v <= 1 ? 0 : v - 1), 1000)
     return () => clearInterval(t)
   }, [countdown])
+  useEffect(() => {
+    const msg = new URLSearchParams(location.search).get('oauth_error')
+    if (msg) setErr(decodeURIComponent(msg))
+  }, [])
   async function sendEmailCode() {
     if (!form.email.trim()) { setHintColor('#b91c1c'); setHint('请先输入邮箱地址'); return }
     setSending(true); setHintColor('#666'); setHint('正在发送...')
@@ -554,7 +572,7 @@ function AuthPage({ mode, setMe, site = defaultSite }) {
   async function submit(e) {
     e.preventDefault(); setErr('')
     if (!form.username.trim() || !form.password.trim()) return setErr('请填写用户名和密码')
-    if (!form.captcha.trim()) return setErr('请填写验证码')
+    if (site.captcha_enabled && (!form.captcha_id || !form.captcha.trim())) return setErr('请填写验证码')
     if (!isLogin && !form.email.trim()) return setErr('请填写邮箱')
     setLoading(true)
     try {
@@ -572,9 +590,10 @@ function AuthPage({ mode, setMe, site = defaultSite }) {
         {!isLogin && <div className="form-group"><label className="form-label" htmlFor="email">邮箱</label><input id="email" type="text" className="form-input" placeholder="请输入邮箱地址" required value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /><p className="form-hint">没有邮箱？填 手机号@phoneTEL（如：13812345678@phoneTEL）</p></div>}
         {!isLogin && <div className="form-group"><label className="form-label">邮箱验证码</label><div style={{ display: 'flex', gap: 10 }}><input type="text" className="form-input" placeholder="请输入6位邮箱验证码" required maxLength={6} style={{ flex: 1 }} value={form.email_code} onChange={e => setForm({ ...form, email_code: e.target.value })} /><button type="button" className="btn btn-primary send-code-btn" disabled={sending || countdown > 0} onClick={sendEmailCode}>{sending ? '发送中...' : countdown > 0 ? `${countdown}s后重发` : '发送验证码'}</button></div><p className="form-hint" style={{ color: hintColor }}>{hint}</p></div>}
         <div className="form-group"><label className="form-label" htmlFor="password">密码</label><input id="password" type="password" className="form-input" placeholder="请输入密码" required minLength={4} value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} /></div>
-        <CaptchaBox value={form.captcha} onChange={captcha => setForm({ ...form, captcha })} />
+        {site.captcha_enabled && <CaptchaBox value={form.captcha} captchaId={form.captcha_id} onChange={captcha => setForm({ ...form, captcha })} onChallenge={captcha_id => setForm(f => ({ ...f, captcha_id, captcha: '' }))} />}
         <button type="submit" className="btn btn-primary auth-submit" disabled={loading}>{loading ? '提交中...' : (isLogin ? '登录' : '注册')}</button>
       </form>
+      {site.qidao_oauth_enabled && <div className="oauth-login"><div className="oauth-divider"><span>或使用第三方登录</span></div><a className="btn btn-secondary qidao-login" href={`/api/oauth/qidao/start?next=${encodeURIComponent('/')}`}><i className="fas fa-island-tropical" /> 栖岛账号登录</a></div>}
       <div className={isLogin ? 'login-footer' : 'register-footer'}>{isLogin ? <>没有账号？<a href="/register">立即注册</a></> : <>已有账号？<a href="/login">立即登录</a></>}</div>
     </div>
     <div className="sticker"><img src="/static/sticker.png" alt="" loading="lazy" decoding="async" onError={e => { e.currentTarget.style.display = 'none' }} /></div>
@@ -1532,6 +1551,7 @@ function AdminSettings({ data, draft, setDraft, run }) {
       <label><span>网站名字</span><input className="form-input" value={s.site_name || ''} placeholder="泓聊社区" onChange={e => set('site_name', e.target.value)} /></label>
       <label><span>网站 Logo URL</span><input className="form-input" value={s.site_logo || ''} placeholder="/uploads/logo.png 或 https://..." onChange={e => set('site_logo', e.target.value)} /></label>
       <label><span>默认用户头像</span><input className="form-input" value={s.default_avatar || ''} placeholder="新用户默认头像 URL" onChange={e => set('default_avatar', e.target.value)} /></label>
+      <label><span>登录/注册验证码</span><select className="form-select" value={s.captcha_enabled ? '1' : '0'} onChange={e => set('captcha_enabled', e.target.value === '1')}><option value="0">关闭：登录注册不显示验证码（默认）</option><option value="1">开启：登录注册必须填写验证码</option></select></label>
       <label><span>限制访客浏览</span><select className="form-select" value={s.guest_access_restricted ? '1' : '0'} onChange={e => set('guest_access_restricted', e.target.value === '1')}><option value="0">关闭：访客可搜索/浏览更多帖子和频道</option><option value="1">开启：搜索、翻页、频道、市场需登录</option></select></label>
       <label><span>邮件通知</span><select className="form-select" value={s.email_enabled ? '1' : '0'} onChange={e => set('email_enabled', e.target.value === '1')}><option value="0">关闭</option><option value="1">开启</option></select></label>
       <label><span>SMTP Host</span><input className="form-input" value={s.smtp_host || ''} onChange={e => set('smtp_host', e.target.value)} /></label>
@@ -1540,9 +1560,14 @@ function AdminSettings({ data, draft, setDraft, run }) {
       <label><span>SMTP 密码</span><input className="form-input" type="password" value={s.smtp_password || ''} placeholder="留空或 *** 表示不修改" onChange={e => set('smtp_password', e.target.value)} /></label>
       <label><span>发件人</span><input className="form-input" value={s.smtp_from || ''} onChange={e => set('smtp_from', e.target.value)} /></label>
       <label><span>同一帖子24小时邮件上限</span><input className="form-input" type="number" min="0" max="100" value={s.comment_email_limit_24h ?? 8} onChange={e => set('comment_email_limit_24h', Number(e.target.value || 0))} /></label>
+      <label><span>栖岛第三方登录</span><select className="form-select" value={s.qidao_oauth_enabled ? '1' : '0'} onChange={e => set('qidao_oauth_enabled', e.target.value === '1')}><option value="0">关闭</option><option value="1">开启：登录页显示栖岛账号登录</option></select></label>
+      <label><span>栖岛 Client ID</span><input className="form-input" value={s.qidao_client_id || ''} placeholder="应用ID" onChange={e => set('qidao_client_id', e.target.value)} /></label>
+      <label><span>栖岛 Client Secret</span><input className="form-input" type="password" value={s.qidao_client_secret || ''} placeholder="留空或 *** 表示不修改" onChange={e => set('qidao_client_secret', e.target.value)} /></label>
+      <label><span>栖岛 Scope</span><input className="form-input" value={s.qidao_scope || 'profile email'} placeholder="profile email" onChange={e => set('qidao_scope', e.target.value)} /></label>
       <label className="settings-wide"><span>首页跑马灯 JSON</span><textarea className="form-textarea" value={s.banners_json || ''} placeholder='[{"tag":"HOT","content":"欢迎加入泓聊社区","color":"cyan"}]' onChange={e => set('banners_json', e.target.value)} /></label>
     </div>
     <div className="alert alert-info">访客限制默认关闭：未登录用户可以搜索、翻页浏览帖子、频道和泓市场；发帖、评论、签到、兑换、后台仍需登录。</div>
+    <div className="alert alert-info">栖岛回调地址请在开放平台配置为：<code>{location.origin}/api/oauth/qidao/callback</code>。Client Secret 仅后端保存，前台不会下发。</div>
     <div className="alert alert-info">跑马灯支持 tag/content/color；被评论会生成红色站内气泡，点击单条后红点消失，也可全部已读。</div>
     <div className="admin-actions settings-actions"><button className="btn btn-primary" onClick={save}>保存系统设置</button></div>
   </div>
@@ -1780,7 +1805,7 @@ function App() {
     if (pathname === '/games') return <SimpleSection type="games" />
     if (pathname === '/music') return <SimpleSection type="music" />
     return <Home />
-  }, [path, me])
+  }, [path, me, site])
   const isAuth = new URL(path, location.origin).pathname === '/login' || new URL(path, location.origin).pathname === '/register'
   return <>{isAuth ? page : <><Nav me={me} setMe={setMe} path={path} site={site} />{page}<SiteFooter site={site} /></>}<ToastHost /></>
 }

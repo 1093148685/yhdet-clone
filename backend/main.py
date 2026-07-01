@@ -9,6 +9,7 @@ import sqlite3
 import smtplib
 import urllib.error
 import urllib.request
+import urllib.parse
 import asyncio
 import time
 from datetime import datetime, timezone, timedelta
@@ -19,7 +20,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -236,6 +237,11 @@ def default_settings() -> dict[str, str]:
         "smtp_from": "",
         "comment_email_limit_24h": "8",
         "guest_access_restricted": "0",
+        "captcha_enabled": "0",
+        "qidao_oauth_enabled": "0",
+        "qidao_client_id": "",
+        "qidao_client_secret": "",
+        "qidao_scope": "profile email",
         "banners_json": json.dumps(BANNERS, ensure_ascii=False),
     }
 
@@ -250,8 +256,12 @@ def get_settings(conn: sqlite3.Connection, include_secret: bool = False) -> dict
         pass
     if not include_secret and data.get("smtp_password"):
         data["smtp_password"] = "***"
-    data["email_enabled"] = str(data.get("email_enabled", "0")) in {"1", "true", "True", "yes"}
-    data["guest_access_restricted"] = str(data.get("guest_access_restricted", "0")) in {"1", "true", "True", "yes"}
+    if not include_secret and data.get("qidao_client_secret"):
+        data["qidao_client_secret"] = "***"
+    data["email_enabled"] = str(data.get("email_enabled", "0")) in {"1", "true", "True", "yes", "on"}
+    data["guest_access_restricted"] = str(data.get("guest_access_restricted", "0")) in {"1", "true", "True", "yes", "on"}
+    data["captcha_enabled"] = str(data.get("captcha_enabled", "0")) in {"1", "true", "True", "yes", "on"}
+    data["qidao_oauth_enabled"] = str(data.get("qidao_oauth_enabled", "0")) in {"1", "true", "True", "yes", "on"}
     try:
         data["comment_email_limit_24h"] = int(data.get("comment_email_limit_24h") or 8)
     except Exception:
@@ -420,6 +430,31 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS site_settings(
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS captcha_challenges(
+                id TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS oauth_states(
+                state TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                redirect_to TEXT DEFAULT '/',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS oauth_identities(
+                provider TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                raw_profile TEXT DEFAULT '',
+                access_token TEXT DEFAULT '',
+                refresh_token TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(provider, subject),
+                FOREIGN KEY(user_id) REFERENCES users(id)
             );
             CREATE TABLE IF NOT EXISTS comment_notifications(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -611,6 +646,9 @@ def init_db() -> None:
         conn.execute("UPDATE users SET avatar=? WHERE avatar LIKE 'https://yhdet.top/static/avatars/%'", (DEFAULT_AVATAR,))
         conn.execute("INSERT OR IGNORE INTO site_settings(key,value) VALUES('default_avatar', ?)", (DEFAULT_AVATAR,))
         conn.execute("INSERT OR IGNORE INTO site_settings(key,value) VALUES('guest_access_restricted', '0')")
+        conn.execute("INSERT OR IGNORE INTO site_settings(key,value) VALUES('captcha_enabled', '0')")
+        conn.execute("INSERT OR IGNORE INTO site_settings(key,value) VALUES('qidao_oauth_enabled', '0')")
+        conn.execute("INSERT OR IGNORE INTO site_settings(key,value) VALUES('qidao_scope', 'profile email')")
         conn.execute("UPDATE site_settings SET value=? WHERE key='default_avatar' AND value LIKE 'https://yhdet.top/static/avatars/%'", (DEFAULT_AVATAR,))
         market_seed = [
             ("改名卡", "兑换后提交想修改的新昵称，管理员审核后处理。", 188, 20, ProductCategory.MEMBER_BENEFIT.value, "fa-id-card", '{"request_type":"rename"}'),
@@ -1062,12 +1100,14 @@ class RegisterIn(BaseModel):
     email: str | None = None
     password: str = Field(min_length=4, max_length=128)
     email_code: str | None = None
+    captcha_id: str | None = None
     captcha: str | None = None
 
 
 class LoginIn(BaseModel):
     username: str
     password: str
+    captcha_id: str | None = None
     captcha: str | None = None
 
 
@@ -1138,6 +1178,7 @@ class SiteSettingsIn(BaseModel):
     site_name: str | None = Field(default=None, max_length=80)
     site_logo: str | None = Field(default=None, max_length=500)
     default_avatar: str | None = Field(default=None, max_length=500)
+    captcha_enabled: bool | None = None
     email_enabled: bool | None = None
     smtp_host: str | None = Field(default=None, max_length=200)
     smtp_port: int | None = Field(default=None, ge=1, le=65535)
@@ -1146,6 +1187,10 @@ class SiteSettingsIn(BaseModel):
     smtp_from: str | None = Field(default=None, max_length=200)
     comment_email_limit_24h: int | None = Field(default=None, ge=0, le=100)
     guest_access_restricted: bool | None = None
+    qidao_oauth_enabled: bool | None = None
+    qidao_client_id: str | None = Field(default=None, max_length=200)
+    qidao_client_secret: str | None = Field(default=None, max_length=500)
+    qidao_scope: str | None = Field(default=None, max_length=200)
     banners_json: str | None = Field(default=None, max_length=8000)
 
 
@@ -1237,6 +1282,129 @@ def smtp_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def base_url_from_request(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}".rstrip("/")
+
+
+def captcha_digest(challenge_id: str, code: str) -> str:
+    return hashlib.sha256(f"{challenge_id}:{code.upper()}:yhdet-captcha".encode("utf-8")).hexdigest()
+
+
+def issue_captcha(conn: sqlite3.Connection) -> dict[str, str]:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    code = "".join(secrets.choice(alphabet) for _ in range(5))
+    challenge_id = secrets.token_urlsafe(18)
+    expires = datetime.now() + timedelta(minutes=10)
+    conn.execute(
+        "INSERT INTO captcha_challenges(id,code_hash,expires_at,created_at) VALUES(?,?,?,?)",
+        (challenge_id, captcha_digest(challenge_id, code), expires.strftime("%Y-%m-%d %H:%M:%S"), now()),
+    )
+    return {"id": challenge_id, "code": code, "expires_at": expires.strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def verify_captcha_if_enabled(conn: sqlite3.Connection, captcha_id: str | None, code: str | None) -> None:
+    settings = get_settings(conn)
+    if not settings.get("captcha_enabled"):
+        return
+    captcha_id = (captcha_id or "").strip()
+    code = (code or "").strip().upper()
+    if not captcha_id or not code:
+        raise HTTPException(status_code=400, detail="请填写验证码")
+    row = conn.execute("SELECT * FROM captcha_challenges WHERE id=?", (captcha_id,)).fetchone()
+    if not row or row["used_at"]:
+        raise HTTPException(status_code=400, detail="验证码已失效，请刷新后重试")
+    if row["expires_at"] < now():
+        conn.execute("DELETE FROM captcha_challenges WHERE id=?", (captcha_id,))
+        raise HTTPException(status_code=400, detail="验证码已过期，请刷新后重试")
+    conn.execute("UPDATE captcha_challenges SET used_at=? WHERE id=?", (now(), captcha_id))
+    if row["code_hash"] != captcha_digest(captcha_id, code):
+        raise HTTPException(status_code=400, detail="验证码不正确")
+
+
+def http_json(url: str, *, method: str = "GET", data: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    body = None
+    req_headers = dict(headers or {})
+    if data is not None:
+        body = urllib.parse.urlencode(data).encode("utf-8")
+        req_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+    req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", "ignore")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "ignore")
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = {"error_description": raw or str(exc)}
+        raise HTTPException(status_code=400, detail=parsed.get("error_description") or parsed.get("error") or "第三方登录请求失败")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"第三方登录服务暂时不可用：{exc}")
+    try:
+        return json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=502, detail="第三方登录返回格式异常")
+
+
+def qidao_user_fields(profile: dict[str, Any]) -> tuple[str, str, str, str]:
+    data = profile.get("data") if isinstance(profile.get("data"), dict) else profile
+    subject = str(data.get("uid") or data.get("id") or data.get("openid") or data.get("user_id") or data.get("sub") or "").strip()
+    nickname = str(data.get("screenName") or data.get("nickname") or data.get("username") or data.get("name") or "").strip()
+    avatar = str(data.get("avatar") or data.get("avatarUrl") or data.get("headimgurl") or "").strip()
+    email = normalize_email(data.get("email") or "")
+    return subject, nickname, avatar, email
+
+
+def safe_oauth_username(conn: sqlite3.Connection, preferred: str, subject: str) -> str:
+    base = re.sub(r"[^0-9A-Za-z_\u4e00-\u9fff-]+", "", preferred or "")[:20] or f"栖岛用户{subject[-6:]}"
+    name = base
+    idx = 1
+    while conn.execute("SELECT 1 FROM users WHERE username=?", (name,)).fetchone():
+        suffix = str(idx)
+        name = f"{base[:max(1, 30-len(suffix))]}{suffix}"
+        idx += 1
+    return name
+
+
+def finish_qidao_login(conn: sqlite3.Connection, profile: dict[str, Any], token_data: dict[str, Any], request: Request) -> tuple[str, sqlite3.Row]:
+    subject, nickname, avatar, email = qidao_user_fields(profile)
+    if not subject:
+        raise HTTPException(status_code=400, detail="栖岛用户信息缺少 UID")
+    now_text = now()
+    ip = client_ip(request)
+    identity = conn.execute("SELECT * FROM oauth_identities WHERE provider='qidao' AND subject=?", (subject,)).fetchone()
+    if identity:
+        user = conn.execute("SELECT * FROM users WHERE id=? AND COALESCE(deleted_at,'')=''", (identity["user_id"],)).fetchone()
+        if not user:
+            raise HTTPException(status_code=403, detail="关联账号不存在或已删除")
+    else:
+        user = conn.execute("SELECT * FROM users WHERE email=? AND ?<>'' AND COALESCE(deleted_at,'')=''", (email, email)).fetchone()
+        if not user:
+            username = safe_oauth_username(conn, nickname, subject)
+            cur = conn.execute(
+                "INSERT INTO users(username,email,password_hash,role,avatar,bio,created_at,register_ip,last_login_ip) VALUES(?,?,?,?,?,?,?,?,?)",
+                (username, email or None, hash_password(secrets.token_urlsafe(24)), "user", avatar or current_default_avatar(conn), "", now_text, ip, ip),
+            )
+            user = conn.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
+        conn.execute(
+            "INSERT INTO oauth_identities(provider,subject,user_id,created_at,updated_at) VALUES('qidao',?,?,?,?)",
+            (subject, user["id"], now_text, now_text),
+        )
+    ensure_account_active(conn, user)
+    conn.execute(
+        "UPDATE oauth_identities SET raw_profile=?, access_token=?, refresh_token=?, updated_at=? WHERE provider='qidao' AND subject=?",
+        (json.dumps(profile, ensure_ascii=False)[:8000], str(token_data.get("access_token") or ""), str(token_data.get("refresh_token") or ""), now_text, subject),
+    )
+    if avatar and not (user["avatar"] or ""):
+        conn.execute("UPDATE users SET avatar=? WHERE id=?", (avatar, user["id"]))
+    conn.execute("UPDATE users SET last_login_ip=? WHERE id=?", (ip, user["id"]))
+    token = secrets.token_urlsafe(32)
+    conn.execute("INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)", (token, user["id"], now_text))
+    return token, conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+
+
 def send_smtp_mail(settings: dict[str, Any], to_email: str, subject: str, body: str) -> None:
     host = str(settings.get("smtp_host") or "").strip()
     port = int(settings.get("smtp_port") or 465)
@@ -1268,8 +1436,8 @@ def send_smtp_mail(settings: dict[str, Any], to_email: str, subject: str, body: 
 
 @app.post("/api/captcha")
 def captcha():
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return {"code": "".join(secrets.choice(alphabet) for _ in range(5))}
+    with db() as conn:
+        return issue_captcha(conn)
 
 
 @app.post("/api/send_email_code")
@@ -1329,7 +1497,7 @@ def get_chrome_data(conn: sqlite3.Connection) -> dict[str, Any]:
     settings = get_settings(conn)
     uptime_seconds = int((datetime.now() - SITE_STARTED_AT).total_seconds())
     return {
-        "settings": {"site_name": settings.get("site_name"), "site_logo": settings.get("site_logo"), "default_avatar": settings.get("default_avatar")},
+        "settings": {"site_name": settings.get("site_name"), "site_logo": settings.get("site_logo"), "default_avatar": settings.get("default_avatar"), "captcha_enabled": settings.get("captcha_enabled"), "qidao_oauth_enabled": settings.get("qidao_oauth_enabled"), "qidao_client_id": settings.get("qidao_client_id"), "qidao_scope": settings.get("qidao_scope")},
         "stats": {"visits": visits, "users": users, "posts": posts, "comments": comments},
         "runtime": {"started_at": SITE_STARTED_AT.strftime("%Y-%m-%d %H:%M:%S"), "uptime_seconds": uptime_seconds, "uptime_text": human_duration(uptime_seconds), "version": app.version},
         "banners": get_banners_from_settings(settings),
@@ -1373,6 +1541,7 @@ def register(payload: RegisterIn, request: Request):
     with db() as conn:
         if conn.execute("SELECT 1 FROM banned_identities WHERE email=? OR (ip<>'' AND ip=?)", (email, ip)).fetchone():
             raise HTTPException(status_code=403, detail="该邮箱或网络地址已被禁止注册")
+        verify_captcha_if_enabled(conn, payload.captcha_id, payload.captcha)
         verify_email_code(conn, email, payload.email_code)
         try:
             cur = conn.execute(
@@ -1393,6 +1562,7 @@ def login(payload: LoginIn, request: Request):
     with db() as conn:
         if conn.execute("SELECT 1 FROM banned_identities WHERE ip<>'' AND ip=?", (ip,)).fetchone():
             raise HTTPException(status_code=403, detail="当前网络地址已被禁止访问")
+        verify_captcha_if_enabled(conn, payload.captcha_id, payload.captcha)
         user = conn.execute("SELECT * FROM users WHERE (username=? OR email=?) AND COALESCE(deleted_at,'')=''", (payload.username, payload.username)).fetchone()
         if not user or not verify_password(payload.password, user["password_hash"]):
             raise HTTPException(status_code=400, detail="用户名或密码错误")
@@ -1418,7 +1588,71 @@ def public_settings():
     init_db()
     with db() as conn:
         s = get_settings(conn)
-    return {"settings": {"site_name": s.get("site_name"), "site_logo": s.get("site_logo"), "default_avatar": s.get("default_avatar")}}
+    return {"settings": {"site_name": s.get("site_name"), "site_logo": s.get("site_logo"), "default_avatar": s.get("default_avatar"), "captcha_enabled": s.get("captcha_enabled"), "qidao_oauth_enabled": s.get("qidao_oauth_enabled"), "qidao_client_id": s.get("qidao_client_id"), "qidao_scope": s.get("qidao_scope")}}
+
+
+@app.get("/api/oauth/qidao/start")
+def qidao_oauth_start(request: Request, next: str = "/"):
+    with db() as conn:
+        settings = get_settings(conn, include_secret=True)
+        if not settings.get("qidao_oauth_enabled"):
+            raise HTTPException(status_code=400, detail="栖岛登录尚未启用")
+        client_id = str(settings.get("qidao_client_id") or "").strip()
+        if not client_id:
+            raise HTTPException(status_code=400, detail="栖岛 Client ID 未配置")
+        state = secrets.token_urlsafe(24)
+        redirect_to = next if next.startswith("/") and not next.startswith("//") else "/"
+        conn.execute("INSERT INTO oauth_states(state,provider,redirect_to,created_at) VALUES(?,?,?,?)", (state, "qidao", redirect_to, now()))
+    redirect_uri = f"{base_url_from_request(request)}/api/oauth/qidao/callback"
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": str(settings.get("qidao_scope") or "profile email"),
+        "state": state,
+        "response_type": "code",
+    }
+    return RedirectResponse("https://api.qidao.tvcloud.top/oauth/authorize?" + urllib.parse.urlencode(params))
+
+
+@app.get("/api/oauth/qidao/callback")
+def qidao_oauth_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None, error_description: str | None = None):
+    if error:
+        return RedirectResponse(f"/login?oauth_error={urllib.parse.quote(error_description or error)}")
+    if not code or not state:
+        return RedirectResponse("/login?oauth_error=%E6%A0%96%E5%B2%9B%E5%9B%9E%E8%B0%83%E7%BC%BA%E5%B0%91%E5%8F%82%E6%95%B0")
+    with db() as conn:
+        row = conn.execute("SELECT * FROM oauth_states WHERE state=? AND provider='qidao'", (state,)).fetchone()
+        if not row:
+            return RedirectResponse("/login?oauth_error=state%E9%AA%8C%E8%AF%81%E5%A4%B1%E8%B4%A5")
+        conn.execute("DELETE FROM oauth_states WHERE state=?", (state,))
+        settings = get_settings(conn, include_secret=True)
+        if not settings.get("qidao_oauth_enabled"):
+            raise HTTPException(status_code=400, detail="栖岛登录尚未启用")
+        client_id = str(settings.get("qidao_client_id") or "").strip()
+        client_secret = str(settings.get("qidao_client_secret") or "").strip()
+        if not client_id or not client_secret:
+            raise HTTPException(status_code=400, detail="栖岛 Client ID/Secret 未配置完整")
+        redirect_uri = f"{base_url_from_request(request)}/api/oauth/qidao/callback"
+        token_data = http_json(
+            "https://api.qidao.tvcloud.top/oauth2/token",
+            method="POST",
+            data={"grant_type": "authorization_code", "client_id": client_id, "client_secret": client_secret, "code": code, "redirect_uri": redirect_uri},
+        )
+        access_token = str(token_data.get("access_token") or "")
+        if not access_token:
+            raise HTTPException(status_code=400, detail="栖岛未返回 access_token")
+        profile = http_json("https://api.qidao.tvcloud.top/oauth2/userinfo/oauth?" + urllib.parse.urlencode({"access_token": access_token}))
+        token, user = finish_qidao_login(conn, profile, token_data, request)
+        redirect_to = row["redirect_to"] or "/"
+    safe_user = json.dumps(public_user(user), ensure_ascii=False).replace("</", "<\\/")
+    safe_token = json.dumps(token).replace("</", "<\\/")
+    safe_next = json.dumps(redirect_to).replace("</", "<\\/")
+    html_body = f"""<!doctype html><meta charset=\"utf-8\"><title>栖岛登录成功</title><script>
+localStorage.setItem('yhdet_token', {safe_token});
+localStorage.setItem('yhdet_user', JSON.stringify({safe_user}));
+location.replace({safe_next});
+</script><p>登录成功，正在返回...</p>"""
+    return HTMLResponse(html_body)
 
 
 @app.get("/api/me/notifications")
@@ -2788,9 +3022,9 @@ def admin_update_settings(payload: SiteSettingsIn, authorization: str | None = H
     with db() as conn:
         existing = get_settings(conn, include_secret=True)
         for key, value in data.items():
-            if key == "smtp_password" and (value is None or value == "***"):
+            if key in {"smtp_password", "qidao_client_secret"} and (value is None or value == "***"):
                 continue
-            if key in {"email_enabled", "guest_access_restricted"}:
+            if key in {"email_enabled", "guest_access_restricted", "captcha_enabled", "qidao_oauth_enabled"}:
                 value = "1" if value else "0"
             set_setting(conn, key, value)
         updated = get_settings(conn)

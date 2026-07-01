@@ -285,6 +285,11 @@
         }
         .login-footer a, .register-footer a { color: #4a90d9; text-decoration: none; }
         .login-footer a:hover, .register-footer a:hover { text-decoration: underline; }
+        .oauth-login { margin: 18px 0 4px; text-align: center; }
+        .oauth-divider { display: flex; align-items: center; gap: 10px; color: #94a3b8; font-size: .82rem; margin-bottom: 12px; }
+        .oauth-divider::before, .oauth-divider::after { content: ''; height: 1px; flex: 1; background: #e2e8f0; }
+        .qidao-login { width: 100%; justify-content: center; border-color: #c7d2fe; background: #f8fafc; color: #334155; }
+        .qidao-login:hover { background: #eef2ff; color: #1e40af; }
         .captcha-container { display: flex; align-items: center; gap: 10px; }
         .captcha-input { flex: 1; }
         .captcha-canvas {
