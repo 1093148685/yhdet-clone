@@ -149,6 +149,14 @@ AVATAR_BORDER_PRODUCTS = {
     "avatar_border_google": {"title": "谷歌至尊四色环", "tier": "神话级", "price": 500, "style": "conic-gradient(#4285F4, #EA4335, #FBBC05, #34A853, #4285F4)", "icon": "fa-gem", "desc": "谷歌官方四色渐变头像环，神话级尊贵标识。"},
 }
 
+MARKET_DRESSUP_PRODUCTS = [
+    {"title": "薄荷绿头像环", "desc": "兑换后头像外圈变成清爽薄荷绿细环，帖子、评论和个人主页立即生效。", "price": 80, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-circle", "payload": {"effect": "avatar_border_style", "key": "avatar_ring_mint", "style": "#8FE3C2", "tier": "薄荷绿"}},
+    {"title": "昵称小星星", "desc": "兑换后昵称旁显示一枚低调小星星，在帖子、评论和个人主页立即可见。", "price": 120, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-star", "payload": {"effect": "username_badge", "key": "star", "label": "★"}},
+    {"title": "即时头衔·泓聊居民", "desc": "兑换后立刻获得“泓聊居民”头衔，展示在个人资料和帖子作者信息旁。", "price": 160, "stock": -1, "category": ProductCategory.MEMBER_BENEFIT.value, "icon": "fa-certificate", "payload": {"effect": "custom_title", "title": "泓聊居民"}},
+    {"title": "主页背景·清晨蓝", "desc": "兑换后个人主页资料卡切换为清晨蓝浅渐变背景。", "price": 220, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-image", "payload": {"effect": "profile_theme", "key": "morning_blue"}},
+    {"title": "淡蓝评论纸", "desc": "兑换后你的评论内容区域呈现极淡蓝评论纸效果，保持克制不影响阅读。", "price": 150, "stock": -1, "category": ProductCategory.THEME_DRESSUP.value, "icon": "fa-note-sticky", "payload": {"effect": "comment_theme", "key": "soft_blue"}},
+]
+
 DIRECT_EFFECT_CATEGORIES = {ProductCategory.MEMBER_BENEFIT.value, ProductCategory.THEME_DRESSUP.value, ProductCategory.RARE_PERK.value}
 CARD_KEY_CATEGORIES = {ProductCategory.GIFT_GENERAL.value, ProductCategory.COUPON_TICKET.value, ProductCategory.GAME_ITEM.value}
 MANUAL_PROCESS_CATEGORIES = {ProductCategory.COFFEE_SPONSOR.value, ProductCategory.PERIPHERAL_PHYSICAL.value}
@@ -342,6 +350,9 @@ def init_db() -> None:
                 custom_title TEXT DEFAULT '',
                 avatar TEXT DEFAULT '',
                 avatar_border_style TEXT DEFAULT '#FFFFFF',
+                username_badge TEXT DEFAULT '',
+                profile_theme TEXT DEFAULT '',
+                comment_theme TEXT DEFAULT '',
                 bio TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             );
@@ -599,6 +610,9 @@ def init_db() -> None:
             "ALTER TABLE users ADD COLUMN unlocked_themes TEXT DEFAULT '[]'",
             "ALTER TABLE users ADD COLUMN rare_perks TEXT DEFAULT '[]'",
             "ALTER TABLE users ADD COLUMN avatar_border_style TEXT DEFAULT '#FFFFFF'",
+            "ALTER TABLE users ADD COLUMN username_badge TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN profile_theme TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN comment_theme TEXT DEFAULT ''",
         ):
             try:
                 conn.execute(ddl)
@@ -677,6 +691,20 @@ def init_db() -> None:
             conn.execute(
                 "UPDATE market_items SET description=?, category=?, cover_icon=?, payload_json=?, updated_at=? WHERE title=?",
                 (product["desc"], ProductCategory.THEME_DRESSUP.value, product["icon"], payload_json, now(), product["title"]),
+            )
+        for product in MARKET_DRESSUP_PRODUCTS:
+            payload_json = json.dumps(product["payload"], ensure_ascii=False)
+            conn.execute(
+                """
+                INSERT INTO market_items(title,description,price,stock,category,cover_icon,enabled,payload_json,created_at,updated_at)
+                SELECT ?,?,?,?,?,?,?,?,?,?
+                WHERE NOT EXISTS (SELECT 1 FROM market_items WHERE title=? AND category=?)
+                """,
+                (product["title"], product["desc"], product["price"], product["stock"], product["category"], product["icon"], 1, payload_json, now(), now(), product["title"], product["category"]),
+            )
+            conn.execute(
+                "UPDATE market_items SET description=?, category=?, cover_icon=?, payload_json=?, updated_at=? WHERE title=?",
+                (product["desc"], product["category"], product["icon"], payload_json, now(), product["title"]),
             )
         conn.execute("UPDATE users SET avatar_border_style=? WHERE COALESCE(avatar_border_style,'')=''", (DEFAULT_AVATAR_BORDER_STYLE,))
         conn.execute("UPDATE market_items SET description=?, payload_json=?, category=?, cover_icon=?, price=CASE WHEN COALESCE(price,0)<=0 THEN 188 ELSE price END, updated_at=? WHERE title='改名卡'", ("兑换后提交想修改的新昵称，管理员审核后处理。", '{"request_type":"rename"}', ProductCategory.MEMBER_BENEFIT.value, 'fa-id-card', now()))
@@ -765,6 +793,25 @@ def user_display_flags(row: sqlite3.Row | None) -> dict[str, Any]:
     return {"red_username": user_has_perk(row, "red_username")}
 
 
+def row_text(row: sqlite3.Row | None, key: str, default: str = "") -> str:
+    if not row:
+        return default
+    try:
+        if key in row.keys():
+            return (row[key] or default) or ""
+    except Exception:
+        pass
+    return default
+
+
+def user_decoration(row: sqlite3.Row | None) -> dict[str, str]:
+    return {
+        "username_badge": row_text(row, "username_badge"),
+        "profile_theme": row_text(row, "profile_theme"),
+        "comment_theme": row_text(row, "comment_theme"),
+    }
+
+
 def post_row_to_dict(r: sqlite3.Row, default_avatar: str = DEFAULT_AVATAR) -> dict[str, Any]:
     return {
         "id": r["id"],
@@ -782,6 +829,7 @@ def post_row_to_dict(r: sqlite3.Row, default_avatar: str = DEFAULT_AVATAR) -> di
         "custom_title": r["custom_title"] or ("论坛主" if r["role"] == "admin" else ""),
         "pinned": bool(r["pinned"]),
         "display_flags": user_display_flags(r),
+        **user_decoration(r),
     }
 
 
@@ -814,13 +862,14 @@ def comment_row_to_dict(c: sqlite3.Row, viewer: sqlite3.Row | None = None) -> di
         "can_edit": can_manage,
         "can_delete": can_manage,
         "display_flags": user_display_flags(c),
+        **user_decoration(c),
     }
 
 
 def fetch_post_dict(conn: sqlite3.Connection, post_id: int) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style,
+        SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
                (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND (COALESCE(c.deleted_at,'')='' OR EXISTS (SELECT 1 FROM comments child WHERE child.reply_to_comment_id=c.id AND child.post_id=c.post_id))) AS comment_count
         FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?
         """,
@@ -832,7 +881,7 @@ def fetch_post_dict(conn: sqlite3.Connection, post_id: int) -> dict[str, Any] | 
 def fetch_comment_dict(conn: sqlite3.Connection, post_id: int, comment_id: int, viewer: sqlite3.Row | None = None) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT c.*, u.username, u.avatar, u.avatar_border_style, u.role, u.role_label, u.rare_perks,
+        SELECT c.*, u.username, u.avatar, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme, u.role, u.role_label, u.rare_perks,
                ru.id AS reply_user_id, ru.username AS reply_author, ru.avatar AS reply_avatar,
                rc.content AS reply_content, rc.deleted_at AS reply_deleted_at
         FROM comments c
@@ -917,6 +966,7 @@ def presence_user_payload(user: sqlite3.Row | None, anon_id: str) -> dict[str, A
             "avatar": user["avatar"] or DEFAULT_AVATAR,
             "avatar_border_style": (user["avatar_border_style"] if "avatar_border_style" in user.keys() else "") or DEFAULT_AVATAR_BORDER_STYLE,
             "role": user["role_label"] or ("超管" if user["role"] == "admin" else ""),
+            **user_decoration(user),
             "anonymous": False,
         }
     return {"id": anon_id, "username": "访客", "avatar": DEFAULT_AVATAR, "role": "", "anonymous": True}
@@ -1520,7 +1570,7 @@ def home():
         conn.execute("UPDATE site_stats SET value=value+1 WHERE key='visits'")
         rows = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id
             ORDER BY p.created_at DESC
@@ -1764,6 +1814,7 @@ def public_user(user: sqlite3.Row | None, default_avatar: str = DEFAULT_AVATAR) 
         "account_status": user["account_status"] if "account_status" in user.keys() else "active",
         "frozen_until": user["frozen_until"] if "frozen_until" in user.keys() else "",
         "display_flags": user_display_flags(user),
+        **user_decoration(user),
     }
 
 
@@ -1784,7 +1835,7 @@ def list_posts(q: str = "", page: int = 1, page_size: int = 30, limit: int | Non
     with db() as conn:
         rows = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id
             WHERE ?='' OR p.title LIKE ? OR p.content LIKE ? OR u.username LIKE ?
@@ -1834,7 +1885,7 @@ def get_post(post_id: int, authorization: str | None = Header(default=None)):
         conn.execute("UPDATE posts SET views=views+1 WHERE id=?", (post_id,))
         row = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND (COALESCE(c.deleted_at,'')='' OR EXISTS (SELECT 1 FROM comments child WHERE child.reply_to_comment_id=c.id AND child.post_id=c.post_id))) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?
             """,
@@ -1844,7 +1895,7 @@ def get_post(post_id: int, authorization: str | None = Header(default=None)):
             raise HTTPException(status_code=404, detail="帖子不存在")
         comments = conn.execute(
             """
-            SELECT c.*, u.username, u.avatar, u.avatar_border_style, u.role, u.role_label, u.rare_perks,
+            SELECT c.*, u.username, u.avatar, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme, u.role, u.role_label, u.rare_perks,
                    ru.id AS reply_user_id, ru.username AS reply_author, ru.avatar AS reply_avatar,
                    rc.content AS reply_content, rc.deleted_at AS reply_deleted_at
             FROM comments c
@@ -1982,7 +2033,7 @@ def user_detail(user_id: int, posts_page: int = 1, comments_page: int = 1, sent_
             raise HTTPException(status_code=404, detail="用户不存在")
         rows = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id WHERE p.user_id=? ORDER BY p.created_at DESC LIMIT ? OFFSET ?
             """,
@@ -2121,6 +2172,12 @@ def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category:
     except Exception:
         payload = {}
     if category == ProductCategory.MEMBER_BENEFIT.value:
+        if str(payload.get("effect") or "").strip() == "custom_title":
+            title = str(payload.get("title") or item["title"]).strip()[:24]
+            if not title:
+                raise HTTPException(status_code=400, detail="头衔配置异常")
+            conn.execute("UPDATE users SET custom_title=? WHERE id=?", (title, user_id))
+            return f"头衔已生效：{title}"
         days = int(payload.get("vip_days") or 30)
         current = conn.execute("SELECT vip_until FROM users WHERE id=?", (user_id,)).fetchone()
         base = datetime.now()
@@ -2133,12 +2190,31 @@ def apply_direct_market_effect(conn: sqlite3.Connection, user_id: int, category:
         conn.execute("UPDATE users SET vip_until=?, role_label=CASE WHEN COALESCE(role_label,'')='' THEN 'VIP会员' ELSE role_label END WHERE id=?", (until, user_id))
         return f"VIP 已开通至 {until}"
     if category == ProductCategory.THEME_DRESSUP.value:
-        if payload.get("effect") == "avatar_border_style":
+        effect = str(payload.get("effect") or "").strip()
+        if effect == "avatar_border_style":
             style = str(payload.get("style") or "").strip()
             if not (style.startswith("#") or style.startswith("conic-gradient(")):
                 raise HTTPException(status_code=400, detail="头像边框样式配置异常")
             conn.execute("UPDATE users SET avatar_border_style=? WHERE id=?", (style[:240], user_id))
-            return f"头像边框已生效：{payload.get('tier') or item['title']}"
+            return f"头像环已生效：{payload.get('tier') or item['title']}"
+        if effect == "username_badge":
+            label = str(payload.get("label") or "").strip()[:4]
+            if not label:
+                raise HTTPException(status_code=400, detail="昵称图标配置异常")
+            conn.execute("UPDATE users SET username_badge=? WHERE id=?", (label, user_id))
+            return f"昵称图标已生效：{label}"
+        if effect == "profile_theme":
+            key = str(payload.get("key") or "").strip()[:40]
+            if key not in {"morning_blue"}:
+                raise HTTPException(status_code=400, detail="主页背景配置异常")
+            conn.execute("UPDATE users SET profile_theme=? WHERE id=?", (key, user_id))
+            return "个人主页背景已生效"
+        if effect == "comment_theme":
+            key = str(payload.get("key") or "").strip()[:40]
+            if key not in {"soft_blue"}:
+                raise HTTPException(status_code=400, detail="评论纸配置异常")
+            conn.execute("UPDATE users SET comment_theme=? WHERE id=?", (key, user_id))
+            return "评论纸已生效"
         theme_id = str(payload.get("theme_id") or item["title"]).strip()[:80]
         row = conn.execute("SELECT unlocked_themes FROM users WHERE id=?", (user_id,)).fetchone()
         themes = []
@@ -2713,7 +2789,7 @@ def admin_overview(authorization: str | None = Header(default=None)):
         stats["comments"] = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
         recent_posts = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id
             ORDER BY p.id DESC LIMIT 8
@@ -2861,7 +2937,7 @@ def admin_posts(q: str = "", authorization: str | None = Header(default=None)):
     with db() as conn:
         rows = conn.execute(
             """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style,
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
                    (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
             FROM posts p JOIN users u ON u.id=p.user_id
             WHERE ?='' OR p.title LIKE ? OR p.content LIKE ? OR u.username LIKE ?
@@ -3153,10 +3229,10 @@ def channel_post_detail(post_id: int, authorization: str | None = Header(default
         if not row:
             raise HTTPException(status_code=404, detail="频道内容不存在")
         comments = conn.execute(
-            "SELECT cc.*, u.username, u.avatar, u.avatar_border_style, u.role, u.role_label FROM channel_comments cc JOIN users u ON u.id=cc.user_id WHERE cc.channel_post_id=? ORDER BY cc.id ASC",
+            "SELECT cc.*, u.username, u.avatar, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme, u.role, u.role_label FROM channel_comments cc JOIN users u ON u.id=cc.user_id WHERE cc.channel_post_id=? ORDER BY cc.id ASC",
             (post_id,),
         ).fetchall()
-    return {"post": channel_post_to_dict(row), "comments": [{"id": c["id"], "user_id": c["user_id"], "content": c["content"], "time": c["created_at"], "author": c["username"], "avatar": c["avatar"] or DEFAULT_AVATAR, "avatar_border_style": (c["avatar_border_style"] if "avatar_border_style" in c.keys() else "") or DEFAULT_AVATAR_BORDER_STYLE, "role": c["role_label"] or ("超管" if c["role"] == "admin" else "")} for c in comments]}
+    return {"post": channel_post_to_dict(row), "comments": [{"id": c["id"], "user_id": c["user_id"], "content": c["content"], "time": c["created_at"], "author": c["username"], "avatar": c["avatar"] or DEFAULT_AVATAR, "avatar_border_style": (c["avatar_border_style"] if "avatar_border_style" in c.keys() else "") or DEFAULT_AVATAR_BORDER_STYLE, "role": c["role_label"] or ("超管" if c["role"] == "admin" else ""), **user_decoration(c)} for c in comments]}
 
 
 @app.post("/api/channel_posts/{post_id}/comments")
@@ -3170,10 +3246,10 @@ def add_channel_comment(post_id: int, payload: CommentIn, authorization: str | N
         cur = conn.execute("INSERT INTO channel_comments(channel_post_id,user_id,content,created_at) VALUES(?,?,?,?)", (post_id, user["id"], content, now()))
         comment_id = cur.lastrowid
         row = conn.execute(
-            "SELECT cc.*, u.username, u.avatar, u.avatar_border_style, u.role, u.role_label FROM channel_comments cc JOIN users u ON u.id=cc.user_id WHERE cc.id=?",
+            "SELECT cc.*, u.username, u.avatar, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme, u.role, u.role_label FROM channel_comments cc JOIN users u ON u.id=cc.user_id WHERE cc.id=?",
             (comment_id,),
         ).fetchone()
-        comment = {"id": row["id"], "user_id": row["user_id"], "content": row["content"], "time": row["created_at"], "author": row["username"], "avatar": row["avatar"] or DEFAULT_AVATAR, "avatar_border_style": (row["avatar_border_style"] if "avatar_border_style" in row.keys() else "") or DEFAULT_AVATAR_BORDER_STYLE, "role": row["role_label"] or ("超管" if row["role"] == "admin" else "")}
+        comment = {"id": row["id"], "user_id": row["user_id"], "content": row["content"], "time": row["created_at"], "author": row["username"], "avatar": row["avatar"] or DEFAULT_AVATAR, "avatar_border_style": (row["avatar_border_style"] if "avatar_border_style" in row.keys() else "") or DEFAULT_AVATAR_BORDER_STYLE, "role": row["role_label"] or ("超管" if row["role"] == "admin" else ""), **user_decoration(row)}
     return {"ok": True, "id": comment_id, "comment": comment}
 
 

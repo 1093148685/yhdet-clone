@@ -46,6 +46,15 @@ function AvatarRing({ user, src, alt = '头像', size = 48, className = '', imgC
   return href ? <a href={href} className="avatar-ring-link">{ring}</a> : ring
 }
 function usernameClass(obj) { return obj?.display_flags?.red_username ? 'username-red' : '' }
+function UsernameBadge({ user }) { return user?.username_badge ? <span className="username-badge" aria-label="昵称图标">{user.username_badge}</span> : null }
+function profileThemeClass(user) { return user?.profile_theme ? `profile-theme-${String(user.profile_theme).replace(/[^a-z0-9_-]/gi, '')}` : '' }
+function commentThemeClass(user) { return user?.comment_theme ? `comment-theme-${String(user.comment_theme).replace(/[^a-z0-9_-]/gi, '')}` : '' }
+function isInstantDressupItem(item = {}) {
+  try {
+    const effect = JSON.parse(item.payload_json || '{}')?.effect
+    return ['avatar_border_style','username_badge','custom_title','profile_theme','comment_theme'].includes(effect)
+  } catch { return isAvatarBorderItem(item) }
+}
 
 function currentRoute() {
   return location.pathname + location.search
@@ -321,7 +330,7 @@ function PostItem({ post }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div className="post-title">{post.pinned && <span className="pin-badge"><i className="fas fa-thumbtack" /> 置顶</span>}{post.title}</div>
         <div className="post-preview">{htmlText(post.preview || post.content)}</div>
-        <div className="post-meta"><div className="post-meta-item"><a href={`/user/${post.user_id}`} className={`post-author-name ${usernameClass(post)}`} onClick={e => e.stopPropagation()}>{post.author}</a>{post.role && <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {post.role}</span>}</div><div className="post-meta-item"><i className="far fa-clock" /> {relativeTime(post.time)}</div><div className="post-stats"><span className="post-stat"><i className="far fa-comment" /> {post.comments || ''}</span><span className="post-stat"><i className="far fa-eye" /> {post.views || ''}</span></div></div>
+        <div className="post-meta"><div className="post-meta-item"><a href={`/user/${post.user_id}`} className={`post-author-name ${usernameClass(post)}`} onClick={e => e.stopPropagation()}>{post.author}</a><UsernameBadge user={post} />{post.role && <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {post.role}</span>}</div><div className="post-meta-item"><i className="far fa-clock" /> {relativeTime(post.time)}</div><div className="post-stats"><span className="post-stat"><i className="far fa-comment" /> {post.comments || ''}</span><span className="post-stat"><i className="far fa-eye" /> {post.views || ''}</span></div></div>
         {post.custom_title && <span className="custom-title" style={{ marginTop: 6 }}>{post.custom_title}</span>}
       </div>
     </div>
@@ -334,7 +343,7 @@ function Sidebar({ donors = [], notice = {} }) {
 }
 
 function UserResults({ users }) {
-  return <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-users" /> 用户搜索结果</h3></div><div className="card-body"><div className="user-grid">{users.length ? users.map(u => <a className="user-card" href={`/user/${u.id}`} key={u.id} style={{ textDecoration: 'none' }}><AvatarRing user={u} src={u.avatar} size={62} className="user-card-avatar-ring" /><div className={`user-card-name ${usernameClass(u)}`}>{u.username}</div><div className="user-card-bio">{u.role_label || '社区用户'}</div></a>) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到用户</p></div>}</div></div></div>
+  return <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-users" /> 用户搜索结果</h3></div><div className="card-body"><div className="user-grid">{users.length ? users.map(u => <a className="user-card" href={`/user/${u.id}`} key={u.id} style={{ textDecoration: 'none' }}><AvatarRing user={u} src={u.avatar} size={62} className="user-card-avatar-ring" /><div className={`user-card-name ${usernameClass(u)}`}>{u.username}<UsernameBadge user={u} /></div><div className="user-card-bio">{u.role_label || '社区用户'}</div></a>) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到用户</p></div>}</div></div></div>
 }
 
 function Home() {
@@ -850,10 +859,10 @@ function CommentCard({ comment, onReply, onEdit, onDelete, directReplies = [], o
     setBusy(true)
     try { await onDelete(comment); notify('评论已删除', 'success') } finally { setBusy(false) }
   }
-  return <article id={embedded ? undefined : `comment-${comment.id}`} className={`comment-card topic-post regular ${comment.deleted ? 'is-deleted' : ''} ${embedded ? 'reply-preview-card' : ''} ${menuOpen ? 'menu-active' : ''}`}>
+  return <article id={embedded ? undefined : `comment-${comment.id}`} className={`comment-card topic-post regular ${commentThemeClass(comment)} ${comment.deleted ? 'is-deleted' : ''} ${embedded ? 'reply-preview-card' : ''} ${menuOpen ? 'menu-active' : ''}`}>
     <div className="topic-avatar"><AvatarRing user={comment} src={comment.avatar} size={48} className="topic-avatar-ring" href={`/user/${comment.user_id || ''}`} /></div>
     <div className="comment-main topic-body">
-      <div className="comment-head topic-meta-data"><div className="names"><span className="first"><a className={`comment-author ${usernameClass(comment)}`} href={`/user/${comment.user_id || ''}`}>{comment.author}</a></span>{comment.role && <span className="user-title">{comment.role}</span>}</div><div className="post-infos"><OutgoingReplyLink comment={comment} onJump={jump} /><time className="post-info">{relativeTime(comment.time)}</time>{comment.edited && <span className="edited-mark">已编辑 · {relativeTime(comment.updated_at)}</span>}</div></div>
+      <div className="comment-head topic-meta-data"><div className="names"><span className="first"><a className={`comment-author ${usernameClass(comment)}`} href={`/user/${comment.user_id || ''}`}>{comment.author}</a><UsernameBadge user={comment} /></span>{comment.role && <span className="user-title">{comment.role}</span>}</div><div className="post-infos"><OutgoingReplyLink comment={comment} onJump={jump} /><time className="post-info">{relativeTime(comment.time)}</time>{comment.edited && <span className="edited-mark">已编辑 · {relativeTime(comment.updated_at)}</span>}</div></div>
       <div className="regular-contents">
         {comment.deleted ? <div className="deleted-comment-box"><i className="fas fa-ban" /><div><strong>{comment.deleted_by_admin ? '此评论因违反社区规范已被管理员删除。' : '此评论已删除'}</strong>{comment.deleted_at && <span>删除于 {relativeTime(comment.deleted_at)}</span>}</div></div> : <MarkdownRenderer content={comment.content} compact />}
       </div>
@@ -1042,7 +1051,7 @@ function PostDetail({ id, me }) {
         <div className="post-meta detail-meta">
           <div className="post-author">
             <AvatarRing user={p} src={p.avatar} size={48} className="post-avatar-ring" />
-            <a className={`post-author-name ${usernameClass(p)}`} href={`/user/${p.user_id}`}>{p.author}</a>
+            <a className={`post-author-name ${usernameClass(p)}`} href={`/user/${p.user_id}`}>{p.author}</a><UsernameBadge user={p} />
             {p.role ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {p.role.includes('超级') ? p.role : p.role === '超管' ? '超级管理员' : p.role}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}
           </div>
           {p.custom_title && <span className="custom-title">{p.custom_title}</span>}
@@ -1281,8 +1290,8 @@ function UserPage({ id, me, setMe }) {
     window.dispatchEvent(new Event('notifications:refresh'))
   }
   return <><PageChrome /><div className="main-content"><div className="detail-wrap">
-    <div className="card animate-fadeInUp user-profile-card">
-      <div className="card-body user-profile-body"><div className="profile-head-row"><div className="avatar-wrap"><AvatarRing user={u} src={u.avatar} size={108} className="profile-avatar-ring" />{isMe && <AvatarUploader onDone={avatarDone} />}</div><div className="profile-title-block"><h2 className={`profile-name-with-badge ${usernameClass(u)}`}>{u.username}</h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div></div><ProfileStats stats={data.profile_stats} /></div>
+    <div className={`card animate-fadeInUp user-profile-card ${profileThemeClass(u)}`}>
+      <div className="card-body user-profile-body"><div className="profile-head-row"><div className="avatar-wrap"><AvatarRing user={u} src={u.avatar} size={108} className="profile-avatar-ring" />{isMe && <AvatarUploader onDone={avatarDone} />}</div><div className="profile-title-block"><h2 className={`profile-name-with-badge ${usernameClass(u)}`}>{u.username}<UsernameBadge user={u} /></h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div></div><ProfileStats stats={data.profile_stats} /></div>
     </div>
     <div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-pen-nib" style={{ color: 'var(--primary)' }} /> TA 的帖子 <span className="mini-busy">{data.posts_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowPosts(!showPosts)}>{showPosts ? '折叠' : '展开'}</button></div>{showPosts && <div>{data.posts.length ? data.posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-feather-pointed" /><p>TA 还没有发表过帖子</p></div>}{data.posts_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={morePosts} disabled={loadingPosts}>{loadingPosts ? '加载中...' : '加载更多帖子'}</button></div>}</div>}</div>
     {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.08s' }}><div className="card-header fold-head"><h3><i className="fas fa-receipt" style={{ color: '#f59e0b' }} /> 我的兑换记录 <span className="mini-busy">{data.market_orders_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data.market_orders?.length ? data.market_orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>{me ? '暂无兑换记录' : '登录后查看个人兑换记录'}</p></div>}{data.market_orders_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreOrders} disabled={loadingOrders}>{loadingOrders ? '加载中...' : '加载更多兑换记录'}</button></div>}</div>}</div>}
@@ -1456,11 +1465,16 @@ function AdminMarket({ data, setAdminData, draft, setDraft, run }) {
     MEMBER_BENEFIT: [
       { title:'改名卡', description:'兑换后提交想修改的新昵称，管理员审核后处理。', cover_icon:'fa-id-card', payload_json:'{"request_type":"rename"}' },
       { title:'头衔申请券', description:'提交你想展示的个人头衔，管理员审核后处理。', cover_icon:'fa-crown', payload_json:'{"request_type":"custom_title"}' },
+      { title:'即时头衔·泓聊居民', description:'兑换后立刻获得“泓聊居民”头衔，展示在个人资料和帖子作者信息旁。', cover_icon:'fa-certificate', payload_json:'{"effect":"custom_title","title":"泓聊居民"}' },
       { title:'VIP会员30天', description:'系统自动开通 VIP 身份 30 天。', cover_icon:'fa-crown', payload_json:'{"vip_days":30}' },
       { title:'VIP会员90天', description:'系统自动开通 VIP 身份 90 天。', cover_icon:'fa-crown', payload_json:'{"vip_days":90}' },
     ],
     THEME_DRESSUP: [
       { title:'深色主题', description:'系统自动解锁深色主题。', cover_icon:'fa-palette', payload_json:'{"theme_id":"dark"}' },
+      { title:'薄荷绿头像环', description:'兑换后头像外圈变成清爽薄荷绿细环，帖子、评论和个人主页立即生效。', cover_icon:'fa-circle', payload_json:'{"effect":"avatar_border_style","key":"avatar_ring_mint","style":"#8FE3C2","tier":"薄荷绿"}' },
+      { title:'昵称小星星', description:'兑换后昵称旁显示一枚低调小星星，在帖子、评论和个人主页立即可见。', cover_icon:'fa-star', payload_json:'{"effect":"username_badge","key":"star","label":"★"}' },
+      { title:'主页背景·清晨蓝', description:'兑换后个人主页资料卡切换为清晨蓝浅渐变背景。', cover_icon:'fa-image', payload_json:'{"effect":"profile_theme","key":"morning_blue"}' },
+      { title:'淡蓝评论纸', description:'兑换后你的评论内容区域呈现极淡蓝评论纸效果，保持克制不影响阅读。', cover_icon:'fa-note-sticky', payload_json:'{"effect":"comment_theme","key":"soft_blue"}' },
       { title:'头像颜色卡·绿色', description:'绿色头像外环，清爽初级身份标识。', cover_icon:'fa-circle', payload_json:'{"effect":"avatar_border_style","key":"avatar_border_green","style":"#34D399","tier":"初级"}' },
       { title:'头像颜色卡·蓝色', description:'蓝色头像外环，标准活跃成员标识。', cover_icon:'fa-circle', payload_json:'{"effect":"avatar_border_style","key":"avatar_border_blue","style":"#60A5FA","tier":"标准"}' },
       { title:'头像颜色卡·紫色', description:'紫色头像外环，高级个性身份标识。', cover_icon:'fa-circle', payload_json:'{"effect":"avatar_border_style","key":"avatar_border_purple","style":"#A78BFA","tier":"高级"}' },
@@ -1581,6 +1595,7 @@ function ExchangeModal({ item, balance, busy, onClose, onSubmit }) {
   if (!item) return null
   const type = item.title === '改名卡' ? 'rename' : (item.title === '头衔申请券' || item.title === '自定义头衔卡') ? 'title' : ''
   const isAudit = Boolean(type)
+  const isInstantDressup = isInstantDressupItem(item)
   const isBorder = isAvatarBorderItem(item)
   const label = type === 'rename' ? '新用户名' : '期望头衔名称'
   const hint = type === 'rename' ? '必须以字母开头，只能包含字母、数字和下划线。' : '建议 2-12 个字，管理员审核后展示在个人资料和帖子旁。'
@@ -1597,9 +1612,9 @@ function ExchangeModal({ item, balance, busy, onClose, onSubmit }) {
   return <div className="exchange-mask" role="dialog" aria-modal="true"><div className={`exchange-modal exchange-step-${step}`}>
     <button className="exchange-close" onClick={onClose} disabled={busy} aria-label="关闭"><i className="fas fa-xmark" /></button>
     <div className="exchange-icon"><i className={`fas ${step === 'done' ? 'fa-check' : item.cover_icon || 'fa-gift'}`} /></div>
-    {step === 'confirm' && <><h3>确认兑换「{item.title}」？</h3><p>将扣除 <b>{item.price}</b> 泓币，当前余额 {Number(balance || 0).toLocaleString()} 泓币。{isBorder && <><br />兑换后头像外环将立即生效。</>}</p><div className="exchange-actions"><button className="btn btn-secondary" onClick={onClose}>取消</button><button className="btn btn-primary" onClick={async () => { if (isAudit) return setStep('form'); await onSubmit(item); if (isBorder) setStep('done') }} disabled={busy || (balance || 0) < item.price}>{busy ? '提交中...' : '确认兑换'}</button></div></>}
+    {step === 'confirm' && <><h3>确认兑换「{item.title}」？</h3><p>将扣除 <b>{item.price}</b> 泓币，当前余额 {Number(balance || 0).toLocaleString()} 泓币。{isBorder && <><br />兑换后装扮将立即生效。</>}</p><div className="exchange-actions"><button className="btn btn-secondary" onClick={onClose}>取消</button><button className="btn btn-primary" onClick={async () => { if (isAudit) return setStep('form'); await onSubmit(item); if (isInstantDressup) setStep('done') }} disabled={busy || (balance || 0) < item.price}>{busy ? '提交中...' : '确认兑换'}</button></div></>}
     {step === 'form' && <><h3>{item.title}申请信息</h3><p>确认后会先扣除泓币，订单进入待审核；拒绝时系统自动退款。</p><label className="exchange-field"><span>{label}</span><input autoFocus className={`form-input ${localErr ? 'input-error' : ''}`} value={value} maxLength={32} onChange={e => { setValue(e.target.value); setLocalErr('') }} placeholder={type === 'rename' ? 'New_Name123' : '例如：社区共创者'} /></label><small className={type === 'rename' && value && !usernameOk ? 'field-error' : 'field-hint'}>{type === 'rename' && value && !usernameOk ? '用户名必须以字母开头，且只能包含字母、数字和下划线！' : hint}</small>{localErr && <div className="alert alert-error compact-alert">{localErr}</div>}<div className="exchange-actions"><button className="btn btn-secondary" onClick={() => setStep('confirm')} disabled={busy}>返回</button><button className="btn btn-primary" onClick={submit} disabled={!canSubmit}>{busy ? '提交中...' : '提交审核'}</button></div></>}
-    {step === 'done' && <><h3>{isBorder ? '头像环已生效' : '申请已提交'}</h3><p>{isBorder ? '头像外环已秒级生效，去个人主页和帖子里看看效果吧。' : '申请已提交，请等待管理员审核。'}</p><div className="exchange-actions"><button className="btn btn-primary" onClick={onClose}>知道了</button></div></>}
+    {step === 'done' && <><h3>{isInstantDressup ? '装扮已生效' : '申请已提交'}</h3><p>{isInstantDressup ? '新的社区装扮已秒级生效，去个人主页、帖子和评论里看看效果吧。' : '申请已提交，请等待管理员审核。'}</p><div className="exchange-actions"><button className="btn btn-primary" onClick={onClose}>知道了</button></div></>}
   </div></div>
 }
 
@@ -1613,9 +1628,9 @@ function MarketPage({ me, setMe }) {
   useEffect(() => { document.title = '泓市场 - 泓聊社区'; setData(null); setErr(''); load() }, [])
   async function buy(item, auditValue = '') {
     const isAuditItem = item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡'
-    const isBorderItem = isAvatarBorderItem(item)
+    const isInstantItem = isInstantDressupItem(item)
     const body = { item_id: item.id }
-    if (!isAuditItem && !isBorderItem && item.category === 'PERIPHERAL_PHYSICAL') {
+    if (!isAuditItem && !isInstantItem && item.category === 'PERIPHERAL_PHYSICAL') {
       const shipping_name = prompt('收货人姓名：', '')
       if (!shipping_name?.trim()) return
       const shipping_phone = prompt('联系电话：', '')
@@ -1626,9 +1641,9 @@ function MarketPage({ me, setMe }) {
     }
     setBusy(item.id); setErr('')
     try {
-      const endpoint = isAuditItem ? '/api/market/exchange' : (isBorderItem ? '/api/market/exchange/border' : '/api/market/buy')
+      const endpoint = isAuditItem ? '/api/market/exchange' : '/api/market/buy'
       const r = await api(endpoint, { method:'POST', body: JSON.stringify(isAuditItem ? { item_id:item.id, value:auditValue } : body) })
-      notify(isAuditItem ? '申请已提交，请等待管理员审核' : (isBorderItem ? '头像环已生效' : (r.status === 'PENDING' ? '兑换成功，等待管理员处理' : '兑换成功')), 'success')
+      notify(isAuditItem ? '申请已提交，请等待管理员审核' : (isInstantItem ? '装扮已生效' : (r.status === 'PENDING' ? '兑换成功，等待管理员处理' : '兑换成功')), 'success')
       if (r.user) { syncStoredUser(r.user); setMe?.(r.user) }
       else if (r.current_points !== undefined) { const u = mergeStoredUser({ available_points: r.current_points }); if (u?.id) setMe?.(u) }
       setData(d => ({
@@ -1709,7 +1724,7 @@ function ChannelPostDetail({ id, me }) {
   const p = data.post
   return <><PageChrome /><div className="main-content"><div className="detail-wrap">
     <div className="card animate-fadeInUp post-detail-card"><div className="card-header post-detail-header"><span className="channel-pill">{p.channel_name}</span><h2>{p.title}</h2><div className="post-meta detail-meta"><div className="post-meta-item"><i className="fas fa-user-shield" /> {p.author_name || '管理员'}</div><div className="post-meta-item"><i className="far fa-clock" /> {relativeTime(p.time)}</div><div className="post-meta-item detail-counts"><i className="far fa-comment" /> {data.comments.length || 0}<span className="meta-split">|</span><i className="far fa-eye" /> {p.views || 0}</div></div></div><div className="card-body"><div className="markdown-body">{renderContent(p.content)}</div>{p.external_url && <a className="source-link" href={p.external_url} target="_blank" rel="noreferrer"><i className="fas fa-arrow-up-right-from-square" /> {sourceLinkLabel(p.external_url)}</a>}</div></div>
-    <div className="card animate-fadeInUp reply-card"><div className="card-header"><h3><i className="fas fa-comments" /> 评论 ({data.comments.length})</h3></div><div>{data.comments.length ? data.comments.map(c => <div className="post-item reply-item" key={c.id}><div className="reply-row"><AvatarRing user={c} src={c.avatar} size={48} className="post-avatar-ring" /><div className="reply-main"><div className="reply-head"><a className="post-author-name" href={`/user/${c.user_id || ''}`}>{c.author}</a><span><i className="far fa-clock" /> {relativeTime(c.time)}</span></div><div className="markdown-body reply-content"><p>{c.content}</p></div></div></div></div>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>暂无评论</p></div>}</div></div>
+    <div className="card animate-fadeInUp reply-card"><div className="card-header"><h3><i className="fas fa-comments" /> 评论 ({data.comments.length})</h3></div><div>{data.comments.length ? data.comments.map(c => <div className={`post-item reply-item ${commentThemeClass(c)}`} key={c.id}><div className="reply-row"><AvatarRing user={c} src={c.avatar} size={48} className="post-avatar-ring" /><div className="reply-main"><div className="reply-head"><a className={`post-author-name ${usernameClass(c)}`} href={`/user/${c.user_id || ''}`}>{c.author}</a><UsernameBadge user={c} /><span><i className="far fa-clock" /> {relativeTime(c.time)}</span></div><div className="markdown-body reply-content"><p>{c.content}</p></div></div></div></div>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>暂无评论</p></div>}</div></div>
     <div className="card"><div className="card-body reply-form-body">{err && <div className="alert alert-error">{err}</div>}{me ? <form onSubmit={comment}><textarea className="form-textarea" required maxLength={2000} value={content} onChange={e => setContent(e.target.value)} placeholder="写下你的评论" /><button className="btn btn-primary" style={{ marginTop: 10 }} disabled={sending}><i className={`fas ${sending ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`} /> {sending ? '发送中' : '发表评论'}</button></form> : <><p>登录后即可评论</p><a className="btn btn-primary" href="/login"><i className="fas fa-right-to-bracket" /> 去登录</a></>}</div></div>
     <div className="back-home"><a className="btn btn-secondary" href={`/channels/${p.channel_slug}`}><i className="fas fa-arrow-left" /> 返回频道</a></div>
   </div></div></>

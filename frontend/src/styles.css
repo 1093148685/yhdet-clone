@@ -415,6 +415,14 @@
         .role-super-admin { background: linear-gradient(135deg, #ffd700, #ffed4e); color: #8b6914; }
         .custom-title { display: inline-flex; padding: 2px 8px; border-radius: 10px; background: #f0f7ff; color: #4a90d9; font-size: 0.72rem; }
 
+.username-badge { display: inline-flex; align-items: center; justify-content: center; margin-left: 5px; color: #f59e0b; font-size: .78em; line-height: 1; transform: translateY(-1px); filter: drop-shadow(0 1px 1px rgba(245,158,11,.18)); }
+.profile-name-with-badge .username-badge, .user-card-name .username-badge { font-size: .72em; margin-left: 6px; }
+.user-profile-card.profile-theme-morning_blue { background: linear-gradient(135deg, #eff8ff 0%, #ffffff 52%, #f8fbff 100%); border-color: #bfdbfe; box-shadow: 0 18px 45px rgba(96,165,250,.13); }
+.user-profile-card.profile-theme-morning_blue .user-profile-body { background: radial-gradient(circle at 18% 20%, rgba(147,197,253,.28), transparent 30%), radial-gradient(circle at 80% 18%, rgba(186,230,253,.22), transparent 28%); border-radius: inherit; }
+.comment-card.comment-theme-soft_blue .topic-body { background: linear-gradient(135deg, rgba(239,248,255,.82), rgba(255,255,255,.96)); box-shadow: inset 2px 0 0 rgba(147,197,253,.42); }
+.reply-item.comment-theme-soft_blue { background: linear-gradient(135deg, #f0f8ff, #fff); }
+.comment-card.comment-theme-soft_blue + .comment-card.topic-post .topic-body { border-top-color: #dbeafe; }
+
         /* 搜索 */
         .search-container {
             background: rgba(255,255,255,0.95);
