@@ -983,15 +983,14 @@
 }
 .floating-reply-body .comment-textarea {
   min-height: 118px;
-  border-color: rgba(255,255,255,.1);
-  background: rgba(0,0,0,.28);
-  color: #f4f4f5;
-  box-shadow: none;
+  resize: vertical;
+  background: #fafafa;
+  color: #333;
 }
-.floating-reply-body .comment-textarea::placeholder { color: #71717a; }
+.floating-reply-body .comment-textarea::placeholder { color: #94a3b8; }
 .floating-reply-body .comment-textarea:focus {
-  border-color: rgba(129,140,248,.55);
-  box-shadow: 0 0 0 4px rgba(99,102,241,.12);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light);
 }
 .reply-capsule {
   width: min(620px, calc(100vw - 24px));
