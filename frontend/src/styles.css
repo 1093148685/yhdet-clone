@@ -1078,3 +1078,33 @@
   .editor-actions { align-items: stretch; flex-direction: column; }
   .editor-actions .btn { width: 100%; justify-content: center; }
 }
+
+
+/* 实时顶贴与分享菜单 */
+.post-item { transform-origin: center; }
+.post-item.bumped { animation: postBumpGlow 1.8s ease both; }
+@keyframes postBumpGlow {
+  0% { background: #eff6ff; box-shadow: inset 4px 0 0 #4a90d9; }
+  100% { background: transparent; box-shadow: inset 0 0 0 transparent; }
+}
+.main-post-controls { position: absolute; right: 18px; bottom: 16px; display: inline-flex; align-items: center; gap: 8px; }
+.main-post-controls .main-post-reply-trigger,
+.main-post-controls .main-post-more-trigger { position: static; width: 36px; height: 36px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid #e5e7eb; background: #fff; color: #64748b; box-shadow: 0 8px 24px rgba(15,23,42,.08); transition: transform .16s ease, color .16s ease, border-color .16s ease, background .16s ease; }
+.main-post-controls .main-post-reply-trigger:hover,
+.main-post-controls .main-post-more-trigger:hover { transform: translateY(-1px); color: #2563eb; border-color: #bfdbfe; background: #eff6ff; }
+.global-post-menu { z-index: 16000; }
+.global-post-menu button { white-space: nowrap; }
+
+/* 泓市场卡片：商品说明多少不再影响兑换按钮位置 */
+.market-grid { align-items: stretch; }
+.market-card { height: 100%; min-height: 318px; }
+.market-card-body { flex: 1; display: flex !important; flex-direction: column; gap: 10px; }
+.market-card-body h3 { min-height: 2.6em; display: flex; align-items: center; }
+.market-card-body p { min-height: 4.65em; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.market-card-body .market-meta { margin-top: auto; }
+.market-exchange-btn { width: 100%; justify-content: center; }
+
+@media (max-width: 768px) {
+  .main-post-controls { right: 12px; bottom: 12px; }
+  .market-card { min-height: 292px; }
+}

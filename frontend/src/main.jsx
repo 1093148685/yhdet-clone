@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createPortal } from 'react-dom'
 import './styles.css'
@@ -8,6 +8,63 @@ const fallbackAvatar = '/static/avatar.svg'
 const tokenKey = 'yhdet_token'
 const avatarFallbacks = ['/static/avatar.svg']
 const defaultSite = { site_name: '泓聊社区', site_logo: '', default_avatar: fallbackAvatar }
+
+function absoluteUrl(path = '/') {
+  try { return new URL(path, location.origin).href } catch { return location.origin + '/' }
+}
+function setMetaAttr(selector, attr, value) {
+  let el = document.head.querySelector(selector)
+  if (!el) {
+    el = document.createElement('meta')
+    const name = selector.match(/meta\[(name|property)="([^"]+)"\]/)
+    if (name) el.setAttribute(name[1], name[2])
+    document.head.appendChild(el)
+  }
+  el.setAttribute(attr, value || '')
+}
+function updateSeo({ title = '泓聊社区 - 首页', description = '泓聊社区，轻量实时社区，浏览帖子、评论互动、兑换社区权益。', url = absoluteUrl(location.pathname), image = absoluteUrl('/favicon.svg'), type = 'website' } = {}) {
+  document.title = title
+  setMetaAttr('meta[name="description"]', 'content', description)
+  setMetaAttr('meta[property="og:title"]', 'content', title)
+  setMetaAttr('meta[property="og:description"]', 'content', description)
+  setMetaAttr('meta[property="og:url"]', 'content', url)
+  setMetaAttr('meta[property="og:image"]', 'content', image)
+  setMetaAttr('meta[property="og:type"]', 'content', type)
+  setMetaAttr('meta[name="twitter:card"]', 'content', 'summary')
+}
+function textExcerpt(text = '', limit = 150) {
+  const clean = htmlText(String(text || '')).replace(/[#*_`>\[\]()]/g, ' ').replace(/\s+/g, ' ').trim()
+  return clean.slice(0, limit)
+}
+async function copyText(text, success = '链接已复制') {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove()
+  }
+  notify(success, 'success')
+}
+function sortCommentsForDisplay(comments = []) {
+  if (comments.some(c => Number(c.comment_rank_score || 0) > 0)) {
+    return [...comments].sort((a, b) => Number(b.comment_rank_score || 0) - Number(a.comment_rank_score || 0) || Number(b.id || 0) - Number(a.id || 0))
+  }
+  const nowTs = Date.now()
+  const replyCounts = new Map()
+  for (const c of comments) if (c.reply_to_comment_id) replyCounts.set(Number(c.reply_to_comment_id), (replyCounts.get(Number(c.reply_to_comment_id)) || 0) + 1)
+  return [...comments].sort((a, b) => {
+    const at = new Date(a.time || a.created_at || 0).getTime() || 0
+    const bt = new Date(b.time || b.created_at || 0).getTime() || 0
+    const afresh = nowTs - at < 60000
+    const bfresh = nowTs - bt < 60000
+    if (afresh !== bfresh) return afresh ? -1 : 1
+    if (afresh && bfresh) return bt - at
+    const ar = replyCounts.get(Number(a.id)) || 0
+    const br = replyCounts.get(Number(b.id)) || 0
+    if (ar !== br) return br - ar
+    return bt - at || Number(b.id || 0) - Number(a.id || 0)
+  })
+}
 function safeAvatar(src) {
   if (!src || typeof src !== 'string') return avatarFallbacks[0]
   if (src.includes('robots.txt') || src.includes('t.alcy.cc')) return avatarFallbacks[0]
@@ -340,8 +397,36 @@ function SiteFooter({ site = defaultSite }) {
   </footer>
 }
 
-function PostItem({ post }) {
-  return <a href={`/post/${post.id}`} className="post-item" style={{ textDecoration: 'none', display: 'block' }} onMouseDown={e => e.currentTarget.classList.add('is-active')} onBlur={e => e.currentTarget.classList.remove('is-active')}>
+
+function useFlipList(items, keyFn = x => x.id) {
+  const refs = useRef(new Map())
+  const prevRects = useRef(new Map())
+  useLayoutEffect(() => {
+    const nextRects = new Map()
+    refs.current.forEach((el, key) => {
+      if (!el) return
+      const next = el.getBoundingClientRect()
+      nextRects.set(key, next)
+      const prev = prevRects.current.get(key)
+      if (!prev) return
+      const dx = prev.left - next.left
+      const dy = prev.top - next.top
+      if (!dx && !dy) return
+      el.animate([
+        { transform: `translate(${dx}px, ${dy}px)`, boxShadow: '0 10px 30px rgba(74,144,217,.18)' },
+        { transform: 'translate(0, 0)', boxShadow: '0 0 0 rgba(74,144,217,0)' }
+      ], { duration: 360, easing: 'cubic-bezier(.2,.8,.2,1)' })
+    })
+    prevRects.current = nextRects
+  }, [items.map(keyFn).join('|')])
+  return key => el => {
+    if (el) refs.current.set(key, el)
+    else refs.current.delete(key)
+  }
+}
+
+function PostItem({ post, innerRef }) {
+  return <a ref={innerRef} href={`/post/${post.id}`} className={`post-item ${post.bumped ? 'bumped' : ''}`} style={{ textDecoration: 'none', display: 'block' }} onMouseDown={e => e.currentTarget.classList.add('is-active')} onBlur={e => e.currentTarget.classList.remove('is-active')}>
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
       <AvatarRing user={post} src={post.avatar} size={48} className="post-avatar-ring" />
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -386,6 +471,7 @@ function Home() {
   const queryRef = useRef(query)
   const usersRef = useRef(users)
   const feedReconnectRef = useRef(0)
+  const postFlipRef = useFlipList(posts)
 
   useEffect(() => { queryRef.current = query }, [query])
   useEffect(() => { usersRef.current = users }, [users])
@@ -440,11 +526,15 @@ function Home() {
       ws.onmessage = ev => {
         try {
           const msg = JSON.parse(ev.data)
-          if (msg.type !== 'post_created' || !msg.post) return
-          // Only auto-insert on the normal latest-post feed. Do not disturb search/user-result views.
+          if (!['post_created', 'post_bumped'].includes(msg.type) || !msg.post) return
+          // Only auto-update the normal latest-post feed. Do not disturb search/user-result views.
           if (queryRef.current || usersRef.current) return
-          setPosts(prev => [msg.post, ...prev.filter(p => p.id !== msg.post.id)])
-          setTotalPosts(v => Number(v || 0) + 1)
+          setPosts(prev => {
+            const existed = prev.some(p => p.id === msg.post.id)
+            const merged = existed ? { ...prev.find(p => p.id === msg.post.id), ...msg.post, bumped: msg.type === 'post_bumped' } : msg.post
+            return [merged, ...prev.filter(p => p.id !== msg.post.id)]
+          })
+          if (msg.type === 'post_created') setTotalPosts(v => Number(v || 0) + 1)
         } catch (_) {}
       }
       ws.onclose = () => {
@@ -519,7 +609,7 @@ function Home() {
     finally { setUsersLoadingMore(false) }
   }
   if (!data) return <HomeSkeleton />
-  return <><SiteStats stats={data.stats} /><LedBanner banners={data.banners} /><div className="main-content"><SearchBox onSearch={onSearch} searching={searching} initialQuery={query} initialType={searchTypeRef.current} />{err && <div className="alert alert-error">{err}</div>}<div className="home-layout"><div>{users ? <UserResults users={users} hasMore={usersHasMore} loadingMore={usersLoadingMore} onMore={loadMoreUsers} /> : <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-fire" style={{ color: 'var(--secondary)' }} /> 最新帖子</h3>{searching && <span className="mini-busy">刷新中</span>}</div><div>{searching && posts.length === 0 ? <PostListSkeleton count={5} /> : posts.length ? posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到帖子</p></div>}{posts.length > 0 && <div className="infinite-loader">{loadingMore ? <><i className="fas fa-spinner fa-spin" /> 正在加载下一页...</> : hasMore ? '滑到底部自动加载更多' : '已经到底了'}</div>}</div></div>}</div><Sidebar donors={data.donors} notice={data.notice} /></div></div></>
+  return <><SiteStats stats={data.stats} /><LedBanner banners={data.banners} /><div className="main-content"><SearchBox onSearch={onSearch} searching={searching} initialQuery={query} initialType={searchTypeRef.current} />{err && <div className="alert alert-error">{err}</div>}<div className="home-layout"><div>{users ? <UserResults users={users} hasMore={usersHasMore} loadingMore={usersLoadingMore} onMore={loadMoreUsers} /> : <div className="card animate-fadeInUp"><div className="card-header"><h3><i className="fas fa-fire" style={{ color: 'var(--secondary)' }} /> 最新帖子</h3>{searching && <span className="mini-busy">刷新中</span>}</div><div>{searching && posts.length === 0 ? <PostListSkeleton count={5} /> : posts.length ? posts.map(p => <PostItem key={p.id} post={p} innerRef={postFlipRef(p.id)} />) : <div className="empty-state"><i className="fas fa-search" /><p>没有找到帖子</p></div>}{posts.length > 0 && <div className="infinite-loader">{loadingMore ? <><i className="fas fa-spinner fa-spin" /> 正在加载下一页...</> : hasMore ? '滑到底部自动加载更多' : '已经到底了'}</div>}</div></div>}</div><Sidebar donors={data.donors} notice={data.notice} /></div></div></>
 }
 
 function CaptchaBox({ value, onChange, captchaId, onChallenge }) {
@@ -865,6 +955,47 @@ function CommentMenuPortal({ anchorRef, open, onClose, canEdit, canDelete, busy,
   )
 }
 
+
+function PostMoreMenuPortal({ anchorRef, open, onClose, onShare }) {
+  const [pos, setPos] = useState(null)
+  useLayoutEffect(() => {
+    if (!open || !anchorRef.current) return
+    const update = () => {
+      const r = anchorRef.current.getBoundingClientRect()
+      const width = 178
+      const left = Math.min(window.innerWidth - width - 10, Math.max(10, r.right - width))
+      const top = Math.min(window.innerHeight - 70, r.bottom + 8)
+      setPos({ left, top })
+    }
+    update()
+    const close = e => {
+      if (anchorRef.current?.contains(e.target)) return
+      if (e.target.closest?.('.global-post-menu')) return
+      onClose()
+    }
+    const esc = e => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    document.addEventListener('mousedown', close)
+    document.addEventListener('touchstart', close, { passive: true })
+    document.addEventListener('keydown', esc)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('touchstart', close)
+      document.removeEventListener('keydown', esc)
+    }
+  }, [open, anchorRef, onClose])
+  if (!open || !pos) return null
+  return createPortal(
+    <div className="comment-menu global-post-menu" style={{ left: pos.left, top: pos.top }}>
+      <button type="button" onClick={onShare}><i className="fas fa-share-nodes" /> 分享 / 复制链接</button>
+    </div>,
+    document.body
+  )
+}
+
 function CommentCard({ comment, onReply, onEdit, onDelete, directReplies = [], onJump, embedded = false }) {
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState(false)
@@ -941,7 +1072,9 @@ function PostDetail({ id, me }) {
   const [sending, setSending] = useState(false)
   const [replyStatus, setReplyStatus] = useState('hidden')
   const [detailReady, setDetailReady] = useState(false)
-  const load = (silent = false) => api(`/api/posts/${id}`).then(d => { setData(d); document.title = `${d.post.title} - 泓聊社区` }).catch(e => { if (!silent) setErr(e.message) })
+  const [postMenuOpen, setPostMenuOpen] = useState(false)
+  const postMoreBtnRef = useRef(null)
+  const load = (silent = false) => api(`/api/posts/${id}`).then(d => { setData(d); updateSeo({ title: `${d.post.title} - 泓聊社区`, description: textExcerpt(d.post.content || d.post.preview || ''), url: absoluteUrl(`/post/${id}`), image: absoluteUrl('/favicon.svg'), type: 'article' }) }).catch(e => { if (!silent) setErr(e.message) })
   const handleTopicEvent = useMemo(() => msg => {
     if (!msg?.type?.startsWith('comment_')) return
     setData(old => {
@@ -967,7 +1100,7 @@ function PostDetail({ id, me }) {
   useEffect(() => {
     if (composerMode === 'edit' && draftKey) localStorage.setItem(draftKey, content)
   }, [composerMode, draftKey, content])
-  useEffect(() => { let alive = true; setData(null); setDetailReady(false); setErr(''); setReplyingTo(null); setEditingComment(null); setComposerMode('reply'); setReplyStatus('hidden'); const started = Date.now(); api(`/api/posts/${id}`).then(d => { if (!alive) return; const wait = Math.max(260 - (Date.now() - started), 0); setTimeout(() => { if (alive) { setData(d); setDetailReady(true); document.title = `${d.post.title} - 泓聊社区` } }, wait) }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
+  useEffect(() => { let alive = true; setData(null); setDetailReady(false); setErr(''); setReplyingTo(null); setEditingComment(null); setComposerMode('reply'); setReplyStatus('hidden'); const started = Date.now(); api(`/api/posts/${id}`).then(d => { if (!alive) return; const wait = Math.max(260 - (Date.now() - started), 0); setTimeout(() => { if (alive) { setData(d); setDetailReady(true); updateSeo({ title: `${d.post.title} - 泓聊社区`, description: textExcerpt(d.post.content || d.post.preview || ''), url: absoluteUrl(`/post/${id}`), image: absoluteUrl('/favicon.svg'), type: 'article' }) } }, wait) }).catch(e => alive && setErr(e.message)); return () => { alive = false } }, [id])
   function highlightComment(commentId) {
     const el = document.getElementById(`comment-${commentId}`)
     if (!el) return
@@ -1011,6 +1144,10 @@ function PostDetail({ id, me }) {
     setEditingComment(null)
     setComposerMode('reply')
     setContent('')
+  }
+  function sharePost() {
+    setPostMenuOpen(false)
+    copyText(absoluteUrl(`/post/${id}`), '帖子链接已复制')
   }
   useEffect(() => {
     if (!data || !location.hash.startsWith('#comment-')) return
@@ -1077,12 +1214,16 @@ function PostDetail({ id, me }) {
         </div>
       </div>
       <div className="card-body"><MarkdownRenderer content={p.content} /></div>
-      <button type="button" className="main-post-reply-trigger reply create" title={me ? '回复楼主' : '登录后回复'} aria-label={me ? '回复楼主' : '登录后回复'} onClick={() => startReply(null)}><i className="fas fa-reply" /></button>
+      <div className="main-post-controls">
+        <button type="button" className="main-post-reply-trigger reply create" title={me ? '回复楼主' : '登录后回复'} aria-label={me ? '回复楼主' : '登录后回复'} onClick={() => startReply(null)}><i className="fas fa-reply" /></button>
+        <button ref={postMoreBtnRef} type="button" className="main-post-more-trigger more-toggle" title="更多" aria-label="更多" aria-expanded={postMenuOpen} onClick={() => setPostMenuOpen(v => !v)}><i className="fas fa-ellipsis" /></button>
+        <PostMoreMenuPortal anchorRef={postMoreBtnRef} open={postMenuOpen} onClose={() => setPostMenuOpen(false)} onShare={sharePost} />
+      </div>
     </div>
 
     <section className="card animate-fadeInUp reply-card forum-comments" style={{ animationDelay: '0.1s' }}>
       <div className="card-header comments-header"><div className="comments-title-row"><h3><i className="fas fa-comments" style={{ color: 'var(--primary)' }} /> 评论 <span>{data.comments.length}</span></h3><PresenceBar presence={presence} /></div><PresenceActivity presence={presence} /></div>
-      <CommentList comments={data.comments} onReply={startReply} onEdit={startEdit} onDelete={deleteComment} onJump={highlightComment} />
+      <CommentList comments={sortCommentsForDisplay(data.comments)} onReply={startReply} onEdit={startEdit} onDelete={deleteComment} onJump={highlightComment} />
     </section>
 
     {replyStatus !== 'hidden' && createPortal(
@@ -1323,7 +1464,7 @@ function UserPage({ id, me, setMe }) {
     <div className={`card animate-fadeInUp user-profile-card ${profileThemeClass(u)}`}>
       <div className="card-body user-profile-body"><div className="profile-head-row"><div className="avatar-wrap"><AvatarRing user={u} src={u.avatar} size={108} className="profile-avatar-ring" />{isMe && <AvatarUploader onDone={avatarDone} />}</div><div className="profile-title-block"><h2 className={`profile-name-with-badge ${usernameClass(u)}`}>{u.username}<UsernameBadge user={u} /></h2><div className="profile-badges">{u.role_label ? <span className="role-badge role-super-admin"><i className="fas fa-crown" /> {u.role_label}</span> : <span className="role-badge role-user"><i className="fas fa-user" /> 用户</span>}{u.custom_title && <span className="custom-title">{u.custom_title}</span>}</div></div></div><ProfileStats stats={data.profile_stats} /></div>
     </div>
-    <div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-pen-nib" style={{ color: 'var(--primary)' }} /> TA 的帖子 <span className="mini-busy">{data.posts_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowPosts(!showPosts)}>{showPosts ? '折叠' : '展开'}</button></div>{showPosts && <div>{data.posts.length ? data.posts.map(p => <PostItem key={p.id} post={p} />) : <div className="empty-state"><i className="fas fa-feather-pointed" /><p>TA 还没有发表过帖子</p></div>}{data.posts_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={morePosts} disabled={loadingPosts}>{loadingPosts ? '加载中...' : '加载更多帖子'}</button></div>}</div>}</div>
+    <div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-pen-nib" style={{ color: 'var(--primary)' }} /> TA 的帖子 <span className="mini-busy">{data.posts_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowPosts(!showPosts)}>{showPosts ? '折叠' : '展开'}</button></div>{showPosts && <div>{data.posts.length ? data.posts.map(p => <PostItem key={p.id} post={p} innerRef={postFlipRef(p.id)} />) : <div className="empty-state"><i className="fas fa-feather-pointed" /><p>TA 还没有发表过帖子</p></div>}{data.posts_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={morePosts} disabled={loadingPosts}>{loadingPosts ? '加载中...' : '加载更多帖子'}</button></div>}</div>}</div>
     {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.08s' }}><div className="card-header fold-head"><h3><i className="fas fa-receipt" style={{ color: '#f59e0b' }} /> 我的兑换记录 <span className="mini-busy">{data.market_orders_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data.market_orders?.length ? data.market_orders.map(o => <OrderRow order={o} key={o.id} onChanged={handleOrderChanged} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>{me ? '暂无兑换记录' : '登录后查看个人兑换记录'}</p></div>}{data.market_orders_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreOrders} disabled={loadingOrders}>{loadingOrders ? '加载中...' : '加载更多兑换记录'}</button></div>}</div>}</div>}
     {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.1s' }}><div className="card-header fold-head"><h3><i className="fas fa-message" style={{ color: 'var(--secondary)' }} /> 被评论消息 {data.unread_notifications > 0 && <span className="bubble-badge red-badge inline-bubble">{data.unread_notifications > 99 ? '99+' : data.unread_notifications}</span>}</h3><div className="admin-actions">{data.unread_notifications > 0 && <button className="btn btn-sm btn-secondary" onClick={readAll}>全部已读</button>}<button className="btn btn-sm btn-secondary" onClick={() => setShowComments(!showComments)}>{showComments ? '折叠' : '展开'}</button></div></div>{showComments && <div>{data.received_comments?.length ? data.received_comments.map(c => <button className={`post-item notification-row ${!c.read ? 'is-unread' : ''}`} onClick={() => readOne(c)} key={c.id}><div className="reply-row"><img className="post-avatar" src={safeAvatar(c.avatar)} onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><b>{c.author} 评论了你的帖子</b><span>{relativeTime(c.time)}</span></div><div className="post-preview">《{c.post_title}》</div></div>{!c.read && <span className="unread-dot" />}</div></button>) : <div className="empty-state"><i className="fas fa-comment-slash" /><p>暂无被评论消息</p></div>}{data.received_comments_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreComments} disabled={loadingComments}>{loadingComments ? '加载中...' : '加载更多评论'}</button></div>}</div>}</div>}
     {isMe && <div className="card animate-fadeInUp" style={{ animationDelay: '0.12s' }}><div className="card-header fold-head"><h3><i className="fas fa-paper-plane" style={{ color: '#16a34a' }} /> 我发出的评论 <span className="mini-busy">{data.sent_comments_total || 0}</span></h3><button className="btn btn-sm btn-secondary" onClick={() => setShowSentComments(!showSentComments)}>{showSentComments ? '折叠' : '展开'}</button></div>{showSentComments && <div>{data.sent_comments?.length ? data.sent_comments.map(c => <a className="post-item notification-row sent-comment-row" href={`/post/${c.post_id}#comment-${c.id}`} key={c.id}><div className="reply-row"><img className="post-avatar" src={safeAvatar(c.owner_avatar)} onError={onAvatarError} /><div className="reply-main"><div className="reply-head"><b>回复了 {c.owner_name} 的帖子</b><span>{relativeTime(c.time)}</span></div><div className="post-preview">《{c.post_title}》</div><div className="sent-comment-content">{c.content}</div></div></div></a>) : <div className="empty-state"><i className="fas fa-comment-dots" /><p>还没有发出过评论</p></div>}{data.sent_comments_has_more && <div className="infinite-loader"><button className="btn btn-sm btn-secondary" onClick={moreSentComments} disabled={loadingSentComments}>{loadingSentComments ? '加载中...' : '加载更多发出的评论'}</button></div>}</div>}</div>}
@@ -1702,7 +1843,7 @@ function MarketPage({ me, setMe }) {
   const auditTitles = new Set((data?.orders || []).filter(o => o.status === 'PENDING_AUDIT').map(o => o.title || o.item_title).filter(Boolean))
   const buttonText = item => !me ? '登录后兑换' : (auditTitles.has(item.title) || pendingAuditItemIds.has(item.id) ? '审核中' : ((data.balance || 0) < item.price ? '泓币不足' : item.stock === 0 ? '已售罄' : '兑换'))
   const disabledItem = item => busy === item.id || !me || item.stock === 0 || (data.balance || 0) < item.price || auditTitles.has(item.title) || pendingAuditItemIds.has(item.id)
-  return <><PageChrome /><div className="main-content"><div className="market-hero card animate-fadeInUp"><div className="card-body"><span className="channel-pill">泓市场</span><h1>{Number(data?.balance || 0).toLocaleString()} <small>泓币</small></h1><p>{me ? '发帖和评论获得泓币，可兑换社区权益。' : '登录后可签到、兑换和查看个人兑换记录；访客可先浏览商品。'}</p>{me ? <button className="btn btn-secondary" onClick={checkin}><i className="fas fa-calendar-check" /> 每日签到</button> : <a className="btn btn-secondary" href="/login"><i className="fas fa-right-to-bracket" /> 登录后兑换</a>}<div className="market-rules">{(data?.rules || []).map(x => <span key={x}>{x}</span>)}</div></div></div>{err && <div className="alert alert-error">{err}</div>}<div className="market-grid">{data?.items?.map(item => <div className="market-card card animate-fadeInUp" key={item.id}><div className="market-icon"><i className={`fas ${item.cover_icon || 'fa-gift'}`} /></div><div className="market-card-body"><h3>{item.title}</h3><p>{item.description}</p><div className="market-meta"><b>{item.price} 泓币</b><span>{item.stock < 0 ? '不限量' : `库存 ${item.stock}`}</span></div><button className="btn btn-primary" disabled={disabledItem(item)} onClick={() => setActiveItem(item)}><i className={`fas ${busy === item.id ? 'fa-spinner fa-spin' : auditTitles.has(item.title) || pendingAuditItemIds.has(item.id) ? 'fa-hourglass-half' : 'fa-bag-shopping'}`} /> {buttonText(item)}</button></div></div>)}</div><div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-receipt" /> {me ? '我的兑换记录' : '兑换记录'}</h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data?.orders?.length ? data.orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>{me ? '暂无兑换记录' : '登录后查看个人兑换记录'}</p></div>}</div>}</div></div><ExchangeModal key={activeItem?.id || 'closed'} item={activeItem} balance={data?.balance || 0} busy={Boolean(busy)} onClose={() => setActiveItem(null)} onSubmit={async (item, value) => { await buy(item, value); if (!(item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡' || isInstantDressupItem(item))) setActiveItem(null) }} /></>
+  return <><PageChrome /><div className="main-content"><div className="market-hero card animate-fadeInUp"><div className="card-body"><span className="channel-pill">泓市场</span><h1>{Number(data?.balance || 0).toLocaleString()} <small>泓币</small></h1><p>{me ? '发帖和评论获得泓币，可兑换社区权益。' : '登录后可签到、兑换和查看个人兑换记录；访客可先浏览商品。'}</p>{me ? <button className="btn btn-secondary" onClick={checkin}><i className="fas fa-calendar-check" /> 每日签到</button> : <a className="btn btn-secondary" href="/login"><i className="fas fa-right-to-bracket" /> 登录后兑换</a>}<div className="market-rules">{(data?.rules || []).map(x => <span key={x}>{x}</span>)}</div></div></div>{err && <div className="alert alert-error">{err}</div>}<div className="market-grid">{data?.items?.map(item => <div className="market-card card animate-fadeInUp" key={item.id}><div className="market-icon"><i className={`fas ${item.cover_icon || 'fa-gift'}`} /></div><div className="market-card-body"><h3>{item.title}</h3><p>{item.description}</p><div className="market-meta"><b>{item.price} 泓币</b><span>{item.stock < 0 ? '不限量' : `库存 ${item.stock}`}</span></div><button className="btn btn-primary market-exchange-btn" disabled={disabledItem(item)} onClick={() => setActiveItem(item)}><i className={`fas ${busy === item.id ? 'fa-spinner fa-spin' : auditTitles.has(item.title) || pendingAuditItemIds.has(item.id) ? 'fa-hourglass-half' : 'fa-bag-shopping'}`} /> {buttonText(item)}</button></div></div>)}</div><div className="card animate-fadeInUp"><div className="card-header fold-head"><h3><i className="fas fa-receipt" /> {me ? '我的兑换记录' : '兑换记录'}</h3><button className="btn btn-sm btn-secondary" onClick={() => setShowOrders(!showOrders)}>{showOrders ? '折叠' : '展开'}</button></div>{showOrders && <div>{data?.orders?.length ? data.orders.map(o => <OrderRow order={o} key={o.id} />) : <div className="empty-state"><i className="fas fa-receipt" /><p>{me ? '暂无兑换记录' : '登录后查看个人兑换记录'}</p></div>}</div>}</div></div><ExchangeModal key={activeItem?.id || 'closed'} item={activeItem} balance={data?.balance || 0} busy={Boolean(busy)} onClose={() => setActiveItem(null)} onSubmit={async (item, value) => { await buy(item, value); if (!(item.title === '改名卡' || item.title === '头衔申请券' || item.title === '自定义头衔卡' || isInstantDressupItem(item))) setActiveItem(null) }} /></>
 }
 
 function ChannelsPage() {

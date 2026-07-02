@@ -12,6 +12,8 @@ import urllib.request
 import urllib.parse
 import asyncio
 import time
+import html
+import math
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -25,6 +27,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from PIL import Image, ImageOps, UnidentifiedImageError
 import io
+try:
+    import redis
+except Exception:
+    redis = None
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -35,7 +41,17 @@ DB_PATH = Path(os.getenv("YHDET_DB_PATH", str(DATA_DIR / "community.db")))
 SEED_USER_PASSWORD = os.getenv("YHDET_SEED_USER_PASSWORD", "change-me")
 SITE_STARTED_AT = datetime.now()
 
-app = FastAPI(title="泓聊社区", version="2.0.0")
+REDIS_URL = os.getenv("YHDET_REDIS_URL", "redis://172.17.0.1:6380/0")
+HOT_RANK_KEY = os.getenv("YHDET_HOT_RANK_KEY", "yhdet:hot:posts")
+HOT_UNIQUE_VIEW_KEY_PREFIX = os.getenv("YHDET_UNIQUE_VIEW_PREFIX", "yhdet:post:uv")
+HOT_G = float(os.getenv("YHDET_HOT_DECAY_G", "1.5"))
+HOT_STATIC_BONUS = float(os.getenv("YHDET_HOT_STATIC_BONUS", "500"))
+HOT_DECAY_SECONDS = int(os.getenv("YHDET_HOT_DECAY_SECONDS", "60"))
+HOT_ACTIVE_LIMIT = int(os.getenv("YHDET_HOT_ACTIVE_LIMIT", "1000"))
+_hot_redis_client = None
+hot_rank_decay_task: asyncio.Task | None = None
+
+app = FastAPI(title="泓聊社区", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -686,6 +702,27 @@ def init_db() -> None:
             except sqlite3.OperationalError:
                 pass
         for ddl in (
+            "ALTER TABLE posts ADD COLUMN static_score REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE posts ADD COLUMN last_reply_at TEXT DEFAULT ''",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS post_unique_views(
+                post_id INTEGER NOT NULL,
+                viewer_key TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY(post_id, viewer_key),
+                FOREIGN KEY(post_id) REFERENCES posts(id) ON DELETE CASCADE
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_post_unique_views_post ON post_unique_views(post_id)")
+        conn.execute("UPDATE posts SET last_reply_at=COALESCE(NULLIF(updated_at,''), created_at) WHERE COALESCE(last_reply_at,'')=''")
+
+        for ddl in (
             "ALTER TABLE market_orders ADD COLUMN category TEXT NOT NULL DEFAULT 'GIFT_GENERAL'",
             "ALTER TABLE market_orders ADD COLUMN cost_points INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE market_orders ADD COLUMN shipping_info TEXT NOT NULL DEFAULT ''",
@@ -778,6 +815,15 @@ def init_db() -> None:
         reconcile_successful_cosmetic_orders(conn)
         conn.execute("UPDATE market_items SET description=?, payload_json=?, category=?, cover_icon=?, price=CASE WHEN COALESCE(price,0)<=0 THEN 188 ELSE price END, updated_at=? WHERE title='改名卡'", ("兑换后提交想修改的新昵称，管理员审核后处理。", '{"request_type":"rename"}', ProductCategory.MEMBER_BENEFIT.value, 'fa-id-card', now()))
         conn.execute("UPDATE market_items SET description=?, payload_json=?, category=?, cover_icon=?, price=CASE WHEN COALESCE(price,0)<=0 THEN 288 ELSE price END, stock=CASE WHEN COALESCE(stock,0)=0 THEN 10 ELSE stock END, updated_at=? WHERE title='头衔申请券'", ("提交你想展示的个人头衔，管理员审核后处理。", '{"request_type":"custom_title"}', ProductCategory.MEMBER_BENEFIT.value, 'fa-crown', now()))
+        for ddl in (
+            "ALTER TABLE posts ADD COLUMN static_score REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE posts ADD COLUMN last_reply_at TEXT DEFAULT ''",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
+        conn.execute("UPDATE posts SET last_reply_at=COALESCE(NULLIF(updated_at,''), created_at) WHERE COALESCE(last_reply_at,'')=''")
         if conn.execute("SELECT COUNT(*) FROM users WHERE COALESCE(deleted_at,'')='' ").fetchone()[0] == 0:
             for uid, username, role, role_label, custom_title, avatar in SEED_USERS:
                 conn.execute(
@@ -888,6 +934,7 @@ def post_row_to_dict(r: sqlite3.Row, default_avatar: str = DEFAULT_AVATAR) -> di
         "content": r["content"],
         "preview": r["content"],
         "time": r["created_at"],
+        "updated_at": (r["updated_at"] if "updated_at" in r.keys() else r["created_at"]),
         "views": r["views"],
         "comments": r["comment_count"],
         "user_id": r["user_id"],
@@ -928,6 +975,8 @@ def comment_row_to_dict(c: sqlite3.Row, viewer: sqlite3.Row | None = None) -> di
         "reply_to_avatar": DEFAULT_AVATAR if reply_deleted else ((c["reply_avatar"] if "reply_avatar" in c.keys() else "") or DEFAULT_AVATAR),
         "reply_to_preview": "" if reply_deleted else ((c["reply_content"] or "")[:120] if "reply_content" in c.keys() and c["reply_content"] else ""),
         "reply_to_deleted": reply_deleted,
+        "reply_count": int((c["reply_count"] if "reply_count" in c.keys() else 0) or 0),
+        "comment_rank_score": float((c["comment_rank_score"] if "comment_rank_score" in c.keys() else 0) or 0),
         "can_edit": can_manage,
         "can_delete": can_manage,
         "display_flags": user_display_flags(c),
@@ -952,7 +1001,11 @@ def fetch_comment_dict(conn: sqlite3.Connection, post_id: int, comment_id: int, 
         """
         SELECT c.*, u.username, u.avatar, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme, u.role, u.role_label, u.rare_perks,
                ru.id AS reply_user_id, ru.username AS reply_author, ru.avatar AS reply_avatar,
-               rc.content AS reply_content, rc.deleted_at AS reply_deleted_at
+               rc.content AS reply_content, rc.deleted_at AS reply_deleted_at,
+               (SELECT COUNT(*) FROM comments child WHERE child.reply_to_comment_id=c.id AND child.post_id=c.post_id AND COALESCE(child.deleted_at,'')='') AS reply_count,
+               ((CASE WHEN strftime('%s','now') - strftime('%s', c.created_at) < 60 THEN 1000000 ELSE 0 END) +
+                ((SELECT COUNT(*) FROM comments child WHERE child.reply_to_comment_id=c.id AND child.post_id=c.post_id AND COALESCE(child.deleted_at,'')='') * 1000) +
+                strftime('%s', c.created_at)) AS comment_rank_score
         FROM comments c
         JOIN users u ON u.id=c.user_id
         LEFT JOIN comments rc ON rc.id=c.reply_to_comment_id AND rc.post_id=c.post_id
@@ -1390,9 +1443,202 @@ class MarketFulfillIn(BaseModel):
     delivered_content: str = Field(min_length=1, max_length=1000)
 
 
+def parse_dt(value: str | None) -> datetime:
+    raw = str(value or '').strip()
+    if not raw:
+        return datetime.now()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(raw[:19].replace('T', ' '), "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(raw.replace('Z', '+00:00')).replace(tzinfo=None)
+    except Exception:
+        return datetime.now()
+
+
+def hot_rank_redis():
+    global _hot_redis_client
+    if redis is None:
+        return None
+    if _hot_redis_client is not None:
+        return _hot_redis_client
+    try:
+        client = redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=1.5, socket_timeout=2)
+        client.ping()
+        _hot_redis_client = client
+        return _hot_redis_client
+    except Exception:
+        _hot_redis_client = None
+        return None
+
+
+def is_high_trust_user(row: sqlite3.Row) -> bool:
+    role = str(row['role'] if 'role' in row.keys() else '').lower()
+    role_label = str(row['role_label'] if 'role_label' in row.keys() else '')
+    custom_title = str(row['custom_title'] if 'custom_title' in row.keys() else '')
+    earned = int((row['total_earned'] if 'total_earned' in row.keys() and row['total_earned'] is not None else 0) or 0)
+    return role == 'admin' or '超管' in role_label or '管理员' in role_label or earned >= 100 or '论坛主' in custom_title
+
+
+def hot_rank_metrics(conn: sqlite3.Connection, post_id: int) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone()
+    if not row:
+        return None
+    unique_views = conn.execute("SELECT COUNT(*) FROM post_unique_views WHERE post_id=?", (post_id,)).fetchone()[0]
+    comment_count = conn.execute("SELECT COUNT(*) FROM comments WHERE post_id=? AND COALESCE(deleted_at,'')=''", (post_id,)).fetchone()[0]
+    high_trust = conn.execute(
+        """
+        SELECT COUNT(*) FROM comments c
+        JOIN users u ON u.id=c.user_id
+        LEFT JOIN user_points up ON up.user_id=u.id
+        WHERE c.post_id=? AND COALESCE(c.deleted_at,'')=''
+          AND (u.role='admin' OR COALESCE(u.role_label,'') LIKE '%超管%' OR COALESCE(u.role_label,'') LIKE '%管理员%' OR COALESCE(u.custom_title,'') LIKE '%论坛主%' OR COALESCE(up.total_earned,0)>=100)
+        """,
+        (post_id,),
+    ).fetchone()[0]
+    last_reply_at = (row['last_reply_at'] if 'last_reply_at' in row.keys() else '') or (row['updated_at'] if 'updated_at' in row.keys() else '') or row['created_at']
+    static_score = float((row['static_score'] if 'static_score' in row.keys() else 0) or 0)
+    elapsed = max(0.0, (datetime.now() - parse_dt(last_reply_at)).total_seconds() / 60.0)
+    score = (float(unique_views) + float(comment_count) * 2.0 + float(high_trust) * 5.0 + static_score) / math.pow(elapsed + 2.0, HOT_G)
+    return {
+        'post_id': post_id,
+        'unique_views': int(unique_views or 0),
+        'comment_count': int(comment_count or 0),
+        'high_trust_reply_count': int(high_trust or 0),
+        'static_score': static_score,
+        'time_elapsed_minutes': elapsed,
+        'g': HOT_G,
+        'score': score,
+    }
+
+
+def update_hot_rank(conn: sqlite3.Connection, post_id: int, *, inject_bonus: bool = False) -> dict[str, Any] | None:
+    if inject_bonus:
+        ts = now()
+        conn.execute("UPDATE posts SET static_score=?, last_reply_at=?, updated_at=? WHERE id=?", (HOT_STATIC_BONUS, ts, ts, post_id))
+    metrics = hot_rank_metrics(conn, post_id)
+    client = hot_rank_redis()
+    if client is not None and metrics is not None:
+        try:
+            client.zadd(HOT_RANK_KEY, {str(post_id): float(metrics['score'])})
+        except Exception:
+            pass
+    return metrics
+
+
+def rebuild_hot_rank(limit: int = HOT_ACTIVE_LIMIT) -> dict[str, Any]:
+    client = hot_rank_redis()
+    if client is None:
+        return {'ok': False, 'redis': False, 'updated': 0}
+    updated = 0
+    with db() as conn:
+        rows = conn.execute("SELECT id FROM posts ORDER BY COALESCE(NULLIF(last_reply_at,''), NULLIF(updated_at,''), created_at) DESC, id DESC LIMIT ?", (limit,)).fetchall()
+        pipe = client.pipeline(transaction=False)
+        for r in rows:
+            metrics = hot_rank_metrics(conn, int(r['id']))
+            if not metrics:
+                continue
+            pipe.zadd(HOT_RANK_KEY, {str(r['id']): float(metrics['score'])})
+            updated += 1
+        pipe.execute()
+    return {'ok': True, 'redis': True, 'updated': updated, 'key': HOT_RANK_KEY}
+
+
+async def hot_rank_decay_loop():
+    await asyncio.sleep(2)
+    while True:
+        try:
+            rebuild_hot_rank(HOT_ACTIVE_LIMIT)
+        except Exception:
+            pass
+        await asyncio.sleep(max(10, HOT_DECAY_SECONDS))
+
+
+def viewer_key_for_request(request: Request, viewer: sqlite3.Row | None) -> str:
+    if viewer and not viewer.get('anonymous') if isinstance(viewer, dict) else viewer is not None:
+        try:
+            return f"u:{viewer['id']}"
+        except Exception:
+            pass
+    raw = f"{client_ip(request)}|{request.headers.get('user-agent','')[:160]}"
+    return 'a:' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]
+
+
+def record_unique_view(conn: sqlite3.Connection, post_id: int, request: Request, viewer: sqlite3.Row | None) -> bool:
+    key = viewer_key_for_request(request, viewer)
+    ts = now()
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO post_unique_views(post_id,viewer_key,first_seen_at,last_seen_at) VALUES(?,?,?,?)",
+        (post_id, key, ts, ts),
+    )
+    if cur.rowcount == 0:
+        conn.execute("UPDATE post_unique_views SET last_seen_at=? WHERE post_id=? AND viewer_key=?", (ts, post_id, key))
+        return False
+    return True
+
+
+
+def hot_rank_page(offset: int, limit: int) -> list[tuple[int, float]]:
+    client = hot_rank_redis()
+    if client is None:
+        return []
+    try:
+        raw = client.zrevrange(HOT_RANK_KEY, int(offset), int(offset) + int(limit) - 1, withscores=True)
+        out = []
+        for pid, score in raw:
+            try:
+                out.append((int(pid), float(score)))
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def hot_rank_total(conn: sqlite3.Connection | None = None) -> int:
+    client = hot_rank_redis()
+    if client is not None:
+        try:
+            n = int(client.zcard(HOT_RANK_KEY) or 0)
+            if n:
+                return n
+        except Exception:
+            pass
+    close = False
+    if conn is None:
+        conn = db(); close = True
+    try:
+        return int(conn.execute('SELECT COUNT(*) FROM posts').fetchone()[0] or 0)
+    finally:
+        if close:
+            conn.close()
+
+
+def fetch_posts_by_ids(conn: sqlite3.Connection, ids: list[int]) -> list[sqlite3.Row]:
+    if not ids:
+        return []
+    placeholders = ','.join('?' for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
+               (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND COALESCE(c.deleted_at,'')='') AS comment_count
+        FROM posts p JOIN users u ON u.id=p.user_id
+        WHERE p.id IN ({placeholders})
+        """,
+        ids,
+    ).fetchall()
+    by_id = {int(r['id']): r for r in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
+    global hot_rank_decay_task
     init_db()
+    rebuild_hot_rank()
+    hot_rank_decay_task = asyncio.create_task(hot_rank_decay_loop())
 
 
 @app.get("/api/health")
@@ -1944,6 +2190,65 @@ def public_user(user: sqlite3.Row | None, default_avatar: str = DEFAULT_AVATAR) 
     }
 
 
+def plain_text_excerpt(text: str, limit: int = 160) -> str:
+    cleaned = re.sub(r"<[^>]+>", " ", text or "")
+    cleaned = re.sub(r"[#*_`>\[\]()]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:limit]
+
+
+def site_origin(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
+
+
+def safe_path_avatar(path: str) -> str:
+    return path if str(path).startswith("/") else DEFAULT_AVATAR
+
+
+FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#4a90d9"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs><rect width="64" height="64" rx="18" fill="url(#g)"/><path d="M17 22a10 10 0 0 1 10-10h10a10 10 0 0 1 10 10v7a10 10 0 0 1-10 10h-8l-10 9v-9h-2a10 10 0 0 1-10-10z" fill="white" opacity=".94"/><circle cx="26" cy="26" r="3" fill="#4a90d9"/><circle cx="38" cy="26" r="3" fill="#7c3aed"/></svg>"""
+
+
+@app.get("/favicon.svg")
+def favicon_svg():
+    return Response(FAVICON_SVG, media_type="image/svg+xml")
+
+
+@app.head("/favicon.svg")
+def favicon_svg_head():
+    return Response(status_code=200, media_type="image/svg+xml")
+
+
+@app.get("/api/seo/post/{post_id}")
+def post_seo(post_id: int, request: Request):
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
+                   (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND COALESCE(c.deleted_at,'')='') AS comment_count
+            FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?
+            """,
+            (post_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="帖子不存在")
+        post = post_row_to_dict(row)
+    origin = site_origin(request)
+    avatar = post.get("avatar") or DEFAULT_AVATAR
+    image = f"{origin}{safe_path_avatar(avatar)}" if str(avatar).startswith("/") else avatar
+    return {
+        "title": f"{post['title']} - 泓聊社区",
+        "description": plain_text_excerpt(post.get("content") or post.get("preview") or "泓聊社区帖子"),
+        "url": f"{origin}/post/{post_id}",
+        "image": image or f"{origin}/favicon.svg",
+        "site_name": "泓聊社区",
+        "author": post.get("author") or "泓聊社区",
+        "published_time": post.get("time"),
+        "modified_time": post.get("updated_at") or post.get("time"),
+    }
+
+
 @app.get("/api/posts")
 def list_posts(q: str = "", page: int = 1, page_size: int = 30, limit: int | None = None, offset: int | None = None, authorization: str | None = Header(default=None)):
     q_clean = q.strip()
@@ -1958,32 +2263,73 @@ def list_posts(q: str = "", page: int = 1, page_size: int = 30, limit: int | Non
     page = max(1, int(page or 1))
     page_size = max(1, min(int(page_size or 30), 100))
     offset_value = (page - 1) * page_size
-    with db() as conn:
-        rows = conn.execute(
-            """
-            SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
-                   (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) AS comment_count
-            FROM posts p JOIN users u ON u.id=p.user_id
-            WHERE ?='' OR p.title LIKE ? OR p.content LIKE ? OR u.username LIKE ?
-            ORDER BY p.pinned DESC, p.created_at DESC, p.id DESC
-            LIMIT ? OFFSET ?
-            """,
-            (q_clean, like, like, like, page_size, offset_value),
-        ).fetchall()
-        total = conn.execute(
-            """
-            SELECT COUNT(*) FROM posts p JOIN users u ON u.id=p.user_id
-            WHERE ?='' OR p.title LIKE ? OR p.content LIKE ? OR u.username LIKE ?
-            """,
-            (q_clean, like, like, like),
-        ).fetchone()[0]
+    rank_mode = not q_clean
+    rows = []
+    total = 0
+    rank_scores: dict[int, float] = {}
+    if rank_mode:
+        ids_scores = hot_rank_page(offset_value, page_size)
+        ids = [pid for pid, _ in ids_scores]
+        rank_scores = {pid: score for pid, score in ids_scores}
+        if len(ids) < page_size and offset_value == 0:
+            rebuild_hot_rank()
+            ids_scores = hot_rank_page(offset_value, page_size)
+            ids = [pid for pid, _ in ids_scores]
+            rank_scores = {pid: score for pid, score in ids_scores}
+        with db() as conn:
+            total = hot_rank_total(conn)
+            if ids:
+                placeholders = ','.join('?' for _ in ids)
+                fetched = conn.execute(f"""
+                    SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
+                           (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND COALESCE(c.deleted_at,'')='') AS comment_count
+                    FROM posts p JOIN users u ON u.id=p.user_id
+                    WHERE p.id IN ({placeholders})
+                """, ids).fetchall()
+                by_id = {int(r['id']): r for r in fetched}
+                rows = [by_id[pid] for pid in ids if pid in by_id]
+            else:
+                rows = conn.execute("""
+                    SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
+                           (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND COALESCE(c.deleted_at,'')='') AS comment_count
+                    FROM posts p JOIN users u ON u.id=p.user_id
+                    ORDER BY p.pinned DESC, COALESCE(NULLIF(p.updated_at,''), p.created_at) DESC, p.id DESC
+                    LIMIT ? OFFSET ?
+                """, (page_size, offset_value)).fetchall()
+    else:
+        with db() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
+                       (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND COALESCE(c.deleted_at,'')='') AS comment_count
+                FROM posts p JOIN users u ON u.id=p.user_id
+                WHERE p.title LIKE ? OR p.content LIKE ? OR u.username LIKE ?
+                ORDER BY p.pinned DESC, COALESCE(NULLIF(p.updated_at,''), p.created_at) DESC, p.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (like, like, like, page_size, offset_value),
+            ).fetchall()
+            total = conn.execute(
+                """
+                SELECT COUNT(*) FROM posts p JOIN users u ON u.id=p.user_id
+                WHERE p.title LIKE ? OR p.content LIKE ? OR u.username LIKE ?
+                """,
+                (like, like, like),
+            ).fetchone()[0]
+    items = []
+    for r in rows:
+        item = post_row_to_dict(r)
+        if rank_mode:
+            item['hot_score'] = round(float(rank_scores.get(int(r['id']), 0.0)), 4)
+        items.append(item)
     return {
-        "items": [post_row_to_dict(r) for r in rows],
+        "items": items,
         "total": total,
         "page": page,
         "page_size": page_size,
         "limit": page_size,
         "offset": offset_value,
+        "rank_mode": "redis_zset" if rank_mode else "search_sql",
         "has_more": offset_value + len(rows) < total,
     }
 
@@ -1998,17 +2344,22 @@ async def create_post(payload: PostIn, authorization: str | None = Header(defaul
         )
         post_id = cur.lastrowid
         award_points(conn, user["id"], 12, "发布帖子", "post", post_id)
+        hot_score = (update_hot_rank(conn, post_id, inject_bonus=True) or {}).get('score', 0)
         post = fetch_post_dict(conn, post_id)
         current_points = refresh_user_points(conn, user["id"])
+    if post is not None:
+        post["hot_score"] = round(float(hot_score or 0), 4)
     await feed_realtime_manager.broadcast({"type": "post_created", "post_id": post_id, "post": post})
     return {"ok": True, "id": post_id, "post": post, "current_points": int(current_points or 0)}
 
 
 @app.get("/api/posts/{post_id}")
-def get_post(post_id: int, authorization: str | None = Header(default=None)):
+def get_post(post_id: int, request: Request, authorization: str | None = Header(default=None)):
     viewer = current_user(authorization)
     with db() as conn:
-        conn.execute("UPDATE posts SET views=views+1 WHERE id=?", (post_id,))
+        unique_view = record_unique_view(conn, post_id, request, viewer)
+        if unique_view:
+            conn.execute("UPDATE posts SET views=views+1 WHERE id=?", (post_id,))
         row = conn.execute(
             """
             SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
@@ -2023,14 +2374,18 @@ def get_post(post_id: int, authorization: str | None = Header(default=None)):
             """
             SELECT c.*, u.username, u.avatar, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme, u.role, u.role_label, u.rare_perks,
                    ru.id AS reply_user_id, ru.username AS reply_author, ru.avatar AS reply_avatar,
-                   rc.content AS reply_content, rc.deleted_at AS reply_deleted_at
+                   rc.content AS reply_content, rc.deleted_at AS reply_deleted_at,
+                   (SELECT COUNT(*) FROM comments child WHERE child.reply_to_comment_id=c.id AND child.post_id=c.post_id AND COALESCE(child.deleted_at,'')='') AS reply_count,
+                   ((CASE WHEN strftime('%s','now') - strftime('%s', c.created_at) < 60 THEN 1000000 ELSE 0 END) +
+                    ((SELECT COUNT(*) FROM comments child WHERE child.reply_to_comment_id=c.id AND child.post_id=c.post_id AND COALESCE(child.deleted_at,'')='') * 1000) +
+                    strftime('%s', c.created_at)) AS comment_rank_score
             FROM comments c
             JOIN users u ON u.id=c.user_id
             LEFT JOIN comments rc ON rc.id=c.reply_to_comment_id AND rc.post_id=c.post_id
             LEFT JOIN users ru ON ru.id=rc.user_id
             WHERE c.post_id=?
               AND (COALESCE(c.deleted_at,'')='' OR EXISTS (SELECT 1 FROM comments child WHERE child.reply_to_comment_id=c.id AND child.post_id=c.post_id))
-            ORDER BY c.created_at ASC, c.id ASC
+            ORDER BY comment_rank_score DESC, c.id DESC
             """,
             (post_id,),
         ).fetchall()
@@ -2075,14 +2430,29 @@ async def add_comment(post_id: int, payload: CommentIn, authorization: str | Non
             reply_exists = conn.execute("SELECT id FROM comments WHERE id=? AND post_id=?", (reply_to_comment_id, post_id)).fetchone()
             if not reply_exists:
                 raise HTTPException(status_code=400, detail="回复的评论不存在")
-        cur = conn.execute("INSERT INTO comments(post_id,user_id,content,reply_to_comment_id,created_at) VALUES(?,?,?,?,?)", (post_id, user["id"], content, reply_to_comment_id, now()))
+        ts = now()
+        cur = conn.execute("INSERT INTO comments(post_id,user_id,content,reply_to_comment_id,created_at) VALUES(?,?,?,?,?)", (post_id, user["id"], content, reply_to_comment_id, ts))
         comment_id = cur.lastrowid
         award_points(conn, user["id"], 3, "发表评论", "comment", comment_id)
         _record_comment_notification(conn, exists, user, comment_id, content)
         comment = fetch_comment_dict(conn, post_id, comment_id, user)
+        hot_score = (update_hot_rank(conn, post_id, inject_bonus=True) or {}).get('score', 0)
+        post = fetch_post_dict(conn, post_id)
         comment_count = conn.execute("SELECT COUNT(*) FROM comments WHERE post_id=? AND COALESCE(deleted_at,'')=''", (post_id,)).fetchone()[0]
         current_points = refresh_user_points(conn, user["id"])
+    if post is not None:
+        post["hot_score"] = round(float(hot_score or 0), 4)
+    bus_payload = {
+        "type": "post_bumped",
+        "post_id": post_id,
+        "post": post,
+        "last_reply_user": {"id": user["id"], "username": user["username"], "avatar": user["avatar"] or DEFAULT_AVATAR},
+        "last_reply_time": ts,
+        "latest_comment_excerpt": content[:120],
+        "comment_id": comment_id,
+    }
     await presence_manager.broadcast(post_id, {"type": "comment_created", "post_id": post_id, "comment_id": comment_id, "comment": comment})
+    await feed_realtime_manager.broadcast(bus_payload)
     return {"ok": True, "id": comment_id, "comment": comment, "comment_count": int(comment_count or 0), "current_points": int(current_points or 0)}
 
 
@@ -3913,5 +4283,43 @@ if frontend_dist.exists():
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
         index = frontend_dist / "index.html"
+        post_match = re.fullmatch(r"post/(\d+)", full_path.strip("/"))
+        if post_match:
+            post_id = int(post_match.group(1))
+            try:
+                with db() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT p.*, u.username, u.avatar, u.role, u.role_label, u.custom_title, u.rare_perks, u.avatar_border_style, u.username_badge, u.profile_theme, u.comment_theme,
+                               (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND COALESCE(c.deleted_at,'')='') AS comment_count
+                        FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?
+                        """,
+                        (post_id,),
+                    ).fetchone()
+                if row:
+                    origin = site_origin(request)
+                    title = f"{row['title']} - 泓聊社区"
+                    desc = plain_text_excerpt(row['content'] or '泓聊社区帖子')
+                    url = f"{origin}/post/{post_id}"
+                    avatar = (row['avatar'] or DEFAULT_AVATAR)
+                    image = f"{origin}{safe_path_avatar(avatar)}" if str(avatar).startswith('/') else avatar
+                    html_text = index.read_text(encoding='utf-8')
+                    # Remove generic homepage meta first so crawlers do not pick stale OG fields before post-specific ones.
+                    html_text = re.sub(r'\s*<meta\s+(?:name|property)="(?:description|og:site_name|og:title|og:description|og:type|og:url|og:image|twitter:card)"[^>]*>\n?', '\n', html_text)
+                    meta = (
+                        f'    <meta name="description" content="{html.escape(desc, quote=True)}" />\n'
+                        f'    <meta property="og:site_name" content="泓聊社区" />\n'
+                        f'    <meta property="og:title" content="{html.escape(title, quote=True)}" />\n'
+                        f'    <meta property="og:description" content="{html.escape(desc, quote=True)}" />\n'
+                        f'    <meta property="og:type" content="article" />\n'
+                        f'    <meta property="og:url" content="{html.escape(url, quote=True)}" />\n'
+                        f'    <meta property="og:image" content="{html.escape(image or (origin + "/favicon.svg"), quote=True)}" />\n'
+                        f'    <meta name="twitter:card" content="summary" />\n'
+                    )
+                    html_text = re.sub(r"<title>.*?</title>", f"<title>{html.escape(title)}</title>", html_text, count=1, flags=re.S)
+                    html_text = html_text.replace('</head>', meta + '  </head>')
+                    return HTMLResponse(html_text, headers={"Cache-Control": "no-cache"})
+            except Exception:
+                pass
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
