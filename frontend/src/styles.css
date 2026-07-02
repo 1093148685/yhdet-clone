@@ -1108,3 +1108,14 @@
   .main-post-controls { right: 12px; bottom: 12px; }
   .market-card { min-height: 292px; }
 }
+
+
+/* Admin reports */
+.report-row { align-items: flex-start; }
+.report-row .report-detail { display:block; margin-top:6px; color:#64748b; }
+.report-status { display:inline-flex; align-items:center; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:12px; color:#475569; background:#eef2f7; }
+.report-status.open { color:#9a3412; background:#ffedd5; }
+.report-status.reviewing { color:#1d4ed8; background:#dbeafe; }
+.report-status.resolved { color:#166534; background:#dcfce7; }
+.report-status.rejected { color:#475569; background:#e2e8f0; }
+.admin-card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }

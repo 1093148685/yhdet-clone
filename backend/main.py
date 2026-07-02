@@ -590,6 +590,23 @@ def init_db() -> None:
                 banned_by INTEGER,
                 data_json TEXT DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS content_reports(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_type TEXT NOT NULL,
+                target_id INTEGER NOT NULL,
+                post_id INTEGER,
+                reporter_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                detail TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                admin_note TEXT DEFAULT '',
+                handled_by INTEGER,
+                handled_at TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(target_type, target_id, reporter_id),
+                FOREIGN KEY(reporter_id) REFERENCES users(id),
+                FOREIGN KEY(handled_by) REFERENCES users(id)
+            );
             CREATE TABLE IF NOT EXISTS market_items(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
@@ -668,6 +685,8 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON comment_notifications(user_id, created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_email_log_post_user_created ON email_notification_log(user_id, post_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_email_codes_expires ON email_verification_codes(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_reports_status_created ON content_reports(status, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_reports_target ON content_reports(target_type, target_id);
             """
         )
         for ddl in (
@@ -1301,6 +1320,18 @@ class PostIn(BaseModel):
 class CommentIn(BaseModel):
     content: str = Field(min_length=1, max_length=2000)
     reply_to_comment_id: int | None = None
+
+
+class ReportIn(BaseModel):
+    target_type: str = Field(pattern="^(post|comment)$")
+    target_id: int = Field(gt=0)
+    reason: str = Field(min_length=1, max_length=80)
+    detail: str | None = Field(default='', max_length=1000)
+
+
+class AdminReportIn(BaseModel):
+    status: str = Field(pattern="^(open|reviewing|resolved|rejected)$")
+    admin_note: str | None = Field(default='', max_length=1000)
 
 
 COMMENT_MIN_LENGTH = 16
@@ -3587,6 +3618,110 @@ def admin_bans(authorization: str | None = Header(default=None)):
         rows = conn.execute("SELECT * FROM banned_identities ORDER BY id DESC LIMIT 200").fetchall()
     return {"items": [{"id": r["id"], "user_id": r["user_id"], "username": r["username"], "email": r["email"], "ip": r["ip"], "reason": r["reason"], "banned_at": r["banned_at"]} for r in rows]}
 
+
+def content_report_to_dict(r: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": r["id"],
+        "target_type": r["target_type"],
+        "target_id": r["target_id"],
+        "post_id": r["post_id"],
+        "reason": r["reason"],
+        "detail": r["detail"] or "",
+        "status": r["status"],
+        "admin_note": r["admin_note"] or "",
+        "created_at": r["created_at"],
+        "handled_at": r["handled_at"] or "",
+        "reporter": r["reporter"] if "reporter" in r.keys() else "",
+        "handler": r["handler"] if "handler" in r.keys() else "",
+        "target_preview": r["target_preview"] if "target_preview" in r.keys() else "",
+        "post_title": r["post_title"] if "post_title" in r.keys() else "",
+        "target_author": r["target_author"] if "target_author" in r.keys() else "",
+    }
+
+
+@app.post("/api/reports")
+def create_content_report(payload: ReportIn, authorization: str | None = Header(default=None)):
+    user = require_user(current_user(authorization))
+    reason = payload.reason.strip()
+    detail = (payload.detail or "").strip()
+    with db() as conn:
+        if payload.target_type == "post":
+            row = conn.execute("SELECT id FROM posts WHERE id=?", (payload.target_id,)).fetchone()
+            post_id = payload.target_id
+        else:
+            row = conn.execute("SELECT id, post_id FROM comments WHERE id=? AND COALESCE(deleted_at,'')=''", (payload.target_id,)).fetchone()
+            post_id = row["post_id"] if row else None
+        if not row:
+            raise HTTPException(status_code=404, detail="举报对象不存在或已删除")
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO content_reports(target_type,target_id,post_id,reporter_id,reason,detail,status,created_at)
+                VALUES(?,?,?,?,?,?, 'open', ?)
+                """,
+                (payload.target_type, payload.target_id, post_id, user["id"], reason, detail, now()),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="你已经举报过这个内容，管理员会处理")
+    return {"ok": True, "id": cur.lastrowid}
+
+
+@app.get("/api/admin/reports")
+def admin_reports(status: str = "open", authorization: str | None = Header(default=None)):
+    require_admin(current_user(authorization))
+    status = (status or "open").strip()
+    where = "1=1" if status == "all" else "r.status=?"
+    params: tuple[Any, ...] = () if status == "all" else (status,)
+    with db() as conn:
+        rows = conn.execute(f"""
+            SELECT r.*, reporter.username AS reporter, handler.username AS handler,
+                   CASE WHEN r.target_type='post' THEN p.content ELSE c.content END AS target_preview,
+                   COALESCE(p.title, cp.title, '') AS post_title,
+                   COALESCE(pu.username, cu.username, '') AS target_author
+            FROM content_reports r
+            JOIN users reporter ON reporter.id=r.reporter_id
+            LEFT JOIN users handler ON handler.id=r.handled_by
+            LEFT JOIN posts p ON r.target_type='post' AND p.id=r.target_id
+            LEFT JOIN comments c ON r.target_type='comment' AND c.id=r.target_id
+            LEFT JOIN posts cp ON r.target_type='comment' AND cp.id=c.post_id
+            LEFT JOIN users pu ON pu.id=p.user_id
+            LEFT JOIN users cu ON cu.id=c.user_id
+            WHERE {where}
+            ORDER BY CASE r.status WHEN 'open' THEN 0 WHEN 'reviewing' THEN 1 ELSE 2 END, r.id DESC
+            LIMIT 200
+        """, params).fetchall()
+    return {"items": [content_report_to_dict(r) for r in rows]}
+
+
+@app.patch("/api/admin/reports/{report_id}")
+def admin_update_report(report_id: int, payload: AdminReportIn, authorization: str | None = Header(default=None)):
+    admin = require_admin(current_user(authorization))
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE content_reports SET status=?, admin_note=?, handled_by=?, handled_at=? WHERE id=?",
+            (payload.status, (payload.admin_note or '').strip(), admin["id"], now(), report_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="举报不存在")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/reports/{report_id}/target")
+def admin_delete_report_target(report_id: int, authorization: str | None = Header(default=None)):
+    admin = require_admin(current_user(authorization))
+    with db() as conn:
+        r = conn.execute("SELECT * FROM content_reports WHERE id=?", (report_id,)).fetchone()
+        if not r:
+            raise HTTPException(status_code=404, detail="举报不存在")
+        if r["target_type"] == "post":
+            conn.execute("DELETE FROM comments WHERE post_id=?", (r["target_id"],))
+            cur = conn.execute("DELETE FROM posts WHERE id=?", (r["target_id"],))
+        else:
+            cur = conn.execute("UPDATE comments SET deleted_at=?, deleted_by=?, deleted_by_admin=1 WHERE id=? AND COALESCE(deleted_at,'')=''", (now(), admin["id"], r["target_id"]))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="内容不存在或已删除")
+        conn.execute("UPDATE content_reports SET status='resolved', admin_note=CASE WHEN admin_note='' THEN '已删除违规内容' ELSE admin_note END, handled_by=?, handled_at=? WHERE id=?", (admin["id"], now(), report_id))
+    return {"ok": True}
 
 @app.get("/api/admin/posts")
 def admin_posts(q: str = "", authorization: str | None = Header(default=None)):

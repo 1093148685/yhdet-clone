@@ -906,7 +906,7 @@ function RepliesBar({ replies = [], expanded, setExpanded, onJump }) {
   </div>
 }
 
-function CommentMenuPortal({ anchorRef, open, onClose, canEdit, canDelete, busy, onEdit, onRemove }) {
+function CommentMenuPortal({ anchorRef, open, onClose, canEdit, canDelete, busy, onEdit, onRemove, onReport }) {
   const [pos, setPos] = useState(null)
   useEffect(() => {
     if (!open) return
@@ -950,13 +950,14 @@ function CommentMenuPortal({ anchorRef, open, onClose, canEdit, canDelete, busy,
     <div className={`comment-menu global-comment-menu ${pos.dropup ? 'dropup' : 'dropdown'}`} style={{ left: pos.left, top: pos.top }}>
       <button type="button" disabled={!canEdit} onClick={onEdit}><i className="fas fa-pen" /> 编辑</button>
       <button type="button" disabled={!canDelete || busy} className="danger-link" onClick={onRemove}><i className="fas fa-trash" /> 删除</button>
+      <button type="button" onClick={onReport}><i className="fas fa-flag" /> 举报</button>
     </div>,
     document.body
   )
 }
 
 
-function PostMoreMenuPortal({ anchorRef, open, onClose, onShare }) {
+function PostMoreMenuPortal({ anchorRef, open, onClose, onShare, onReport }) {
   const [pos, setPos] = useState(null)
   useLayoutEffect(() => {
     if (!open || !anchorRef.current) return
@@ -991,12 +992,13 @@ function PostMoreMenuPortal({ anchorRef, open, onClose, onShare }) {
   return createPortal(
     <div className="comment-menu global-post-menu" style={{ left: pos.left, top: pos.top }}>
       <button type="button" onClick={onShare}><i className="fas fa-share-nodes" /> 分享 / 复制链接</button>
+      <button type="button" onClick={onReport}><i className="fas fa-flag" /> 举报帖子</button>
     </div>,
     document.body
   )
 }
 
-function CommentCard({ comment, onReply, onEdit, onDelete, directReplies = [], onJump, embedded = false }) {
+function CommentCard({ comment, onReply, onEdit, onDelete, onReport, directReplies = [], onJump, embedded = false }) {
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -1014,13 +1016,13 @@ function CommentCard({ comment, onReply, onEdit, onDelete, directReplies = [], o
       <div className="regular-contents">
         {comment.deleted ? <div className="deleted-comment-box"><i className="fas fa-ban" /><div><strong>{comment.deleted_by_admin ? '此评论因违反社区规范已被管理员删除。' : '此评论已删除'}</strong>{comment.deleted_at && <span>删除于 {relativeTime(comment.deleted_at)}</span>}</div></div> : <MarkdownRenderer content={comment.content} compact />}
       </div>
-      {!embedded && !comment.deleted && <nav className="comment-actions post-controls"><div className="actions"><button type="button" className="reply create" title="回复" aria-label="回复" onClick={() => onReply(comment)}><i className="fas fa-reply" /></button>{(comment.can_edit || comment.can_delete) && <div className="comment-more"><button ref={moreBtnRef} type="button" className="more-toggle" title="更多" aria-label="更多" aria-expanded={menuOpen} onClick={() => setMenuOpen(v => !v)}><i className="fas fa-ellipsis" /></button><CommentMenuPortal anchorRef={moreBtnRef} open={menuOpen} onClose={() => setMenuOpen(false)} canEdit={comment.can_edit} canDelete={comment.can_delete} busy={busy} onEdit={() => { setMenuOpen(false); onEdit(comment) }} onRemove={() => { setMenuOpen(false); remove() }} /></div>}</div></nav>}
+      {!embedded && !comment.deleted && <nav className="comment-actions post-controls"><div className="actions"><button type="button" className="reply create" title="回复" aria-label="回复" onClick={() => onReply(comment)}><i className="fas fa-reply" /></button><div className="comment-more"><button ref={moreBtnRef} type="button" className="more-toggle" title="更多" aria-label="更多" aria-expanded={menuOpen} onClick={() => setMenuOpen(v => !v)}><i className="fas fa-ellipsis" /></button><CommentMenuPortal anchorRef={moreBtnRef} open={menuOpen} onClose={() => setMenuOpen(false)} canEdit={comment.can_edit} canDelete={comment.can_delete} busy={busy} onEdit={() => { setMenuOpen(false); onEdit(comment) }} onRemove={() => { setMenuOpen(false); remove() }} onReport={() => { setMenuOpen(false); onReport?.('comment', comment.id) }} /></div></div></nav>}
       {!embedded && <RepliesBar replies={directReplies} expanded={expanded} setExpanded={setExpanded} onJump={jump} />}
     </div>
   </article>
 }
 
-function CommentList({ comments = [], onReply, onEdit, onDelete, onJump }) {
+function CommentList({ comments = [], onReply, onEdit, onDelete, onReport, onJump }) {
   const [visible, setVisible] = useState(20)
   const sentinelRef = useRef(null)
   const repliesByParent = useMemo(() => {
@@ -1042,7 +1044,7 @@ function CommentList({ comments = [], onReply, onEdit, onDelete, onJump }) {
     return () => io.disconnect()
   }, [comments.length])
   if (!comments.length) return <div className="empty-state"><i className="fas fa-comment-dots" /><p>暂无回复，来说点什么吧</p></div>
-  return <div className="comment-list">{comments.slice(0, visible).map(c => <CommentCard key={c.id} comment={c} onReply={onReply} onEdit={onEdit} onDelete={onDelete} directReplies={repliesByParent.get(Number(c.id)) || []} onJump={onJump} />)}{visible < comments.length && <div ref={sentinelRef} className="infinite-loader">正在加载更多回复...</div>}</div>
+  return <div className="comment-list">{comments.slice(0, visible).map(c => <CommentCard key={c.id} comment={c} onReply={onReply} onEdit={onEdit} onDelete={onDelete} onReport={onReport} directReplies={repliesByParent.get(Number(c.id)) || []} onJump={onJump} />)}{visible < comments.length && <div ref={sentinelRef} className="infinite-loader">正在加载更多回复...</div>}</div>
 }
 
 function CommentEditor({ me, mode = 'reply', editingComment, content, setContent, replyingTo, onCancelReply, onCancelEdit, onJump, onSubmit, sending, err, onTyping, onTypingEnd }) {
@@ -1149,6 +1151,16 @@ function PostDetail({ id, me }) {
     setPostMenuOpen(false)
     copyText(absoluteUrl(`/post/${id}`), '帖子链接已复制')
   }
+  async function reportContent(targetType, targetId) {
+    if (!me) return navigate('/login')
+    const reason = prompt('举报原因（例如：广告、辱骂、违法、隐私泄露）', '违规内容')
+    if (!reason?.trim()) return
+    const detail = prompt('补充说明（可选）', '') || ''
+    try {
+      await api('/api/reports', { method:'POST', body: JSON.stringify({ target_type: targetType, target_id: Number(targetId), reason: reason.trim(), detail: detail.trim() }) })
+      notify('已提交举报，管理员会尽快处理', 'success')
+    } catch (e) { notify(e.message, 'error') }
+  }
   useEffect(() => {
     if (!data || !location.hash.startsWith('#comment-')) return
     const targetId = location.hash.replace('#comment-', '')
@@ -1217,13 +1229,13 @@ function PostDetail({ id, me }) {
       <div className="main-post-controls">
         <button type="button" className="main-post-reply-trigger reply create" title={me ? '回复楼主' : '登录后回复'} aria-label={me ? '回复楼主' : '登录后回复'} onClick={() => startReply(null)}><i className="fas fa-reply" /></button>
         <button ref={postMoreBtnRef} type="button" className="main-post-more-trigger more-toggle" title="更多" aria-label="更多" aria-expanded={postMenuOpen} onClick={() => setPostMenuOpen(v => !v)}><i className="fas fa-ellipsis" /></button>
-        <PostMoreMenuPortal anchorRef={postMoreBtnRef} open={postMenuOpen} onClose={() => setPostMenuOpen(false)} onShare={sharePost} />
+        <PostMoreMenuPortal anchorRef={postMoreBtnRef} open={postMenuOpen} onClose={() => setPostMenuOpen(false)} onShare={sharePost} onReport={() => { setPostMenuOpen(false); reportContent('post', p.id) }} />
       </div>
     </div>
 
     <section className="card animate-fadeInUp reply-card forum-comments" style={{ animationDelay: '0.1s' }}>
       <div className="card-header comments-header"><div className="comments-title-row"><h3><i className="fas fa-comments" style={{ color: 'var(--primary)' }} /> 评论 <span>{data.comments.length}</span></h3><PresenceBar presence={presence} /></div><PresenceActivity presence={presence} /></div>
-      <CommentList comments={sortCommentsForDisplay(data.comments)} onReply={startReply} onEdit={startEdit} onDelete={deleteComment} onJump={highlightComment} />
+      <CommentList comments={sortCommentsForDisplay(data.comments)} onReply={startReply} onEdit={startEdit} onDelete={deleteComment} onReport={reportContent} onJump={highlightComment} />
     </section>
 
     {replyStatus !== 'hidden' && createPortal(
@@ -1484,6 +1496,7 @@ function AdminPage({ me }) {
     ['overview', '总览', 'fa-chart-line'],
     ['posts', '帖子', 'fa-file-lines'],
     ['comments', '评论', 'fa-comments'],
+    ['reports', '举报', 'fa-flag'],
     ['users', '用户', 'fa-users'],
     ['announcements', '公告', 'fa-bullhorn'],
     ['donors', '捐赠者', 'fa-heart'],
@@ -1536,6 +1549,7 @@ function AdminPage({ me }) {
     {['posts', 'comments', 'users'].includes(tab) && <div className="admin-toolbar"><input className="form-input" placeholder="搜索标题、用户或内容" value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') load(tab, q) }} /><button className="btn btn-primary" onClick={() => load(tab, q)}><i className="fas fa-search" /> 搜索</button></div>}
     {tab === 'posts' && <AdminPosts items={items} run={run} />}
     {tab === 'comments' && <AdminComments items={items} run={run} />}
+    {tab === 'reports' && <AdminReports items={items} run={run} load={load} />}
     {tab === 'users' && <AdminUsers items={items} run={run} />}
     {tab === 'announcements' && <AdminAnnouncements items={items} draft={draft} setDraft={setDraft} run={run} />}
     {tab === 'donors' && <AdminDonors items={items} draft={draft} setDraft={setDraft} run={run} />}
@@ -1553,6 +1567,20 @@ function AdminOverview({ data }) {
 }
 function AdminPosts({ items, run }) { return <div className="admin-card"><h3>帖子管理</h3>{items.map(p => <div className="admin-row" key={p.id}><div><b>{p.title}</b><p>{p.author} · {p.time} · 评论 {p.comments || 0} · 浏览 {p.views || 0}</p></div><div className="admin-actions"><button className="btn btn-sm btn-secondary" onClick={() => run(() => api(`/api/admin/posts/${p.id}`, { method:'PATCH', body: JSON.stringify({ pinned: !p.pinned }) }))}>{p.pinned ? '取消置顶' : '置顶'}</button><a className="btn btn-sm btn-secondary" href={`/post/${p.id}`}>查看</a><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除这个帖子及其评论？') && run(() => api(`/api/admin/posts/${p.id}`, { method:'DELETE' }))}>删除</button></div></div>)}</div> }
 function AdminComments({ items, run }) { return <div className="admin-card"><h3>评论管理</h3>{items.map(c => <div className="admin-row" key={c.id}><div><b>{c.author}</b><p>{c.content}</p><small>来自《{c.post_title}》 · {relativeTime(c.created_at)}</small></div><div className="admin-actions"><a className="btn btn-sm btn-secondary" href={`/post/${c.post_id}`}>查看帖子</a><button className="btn btn-sm btn-danger" onClick={() => confirm('确定删除这条评论？') && run(() => api(`/api/admin/comments/${c.id}`, { method:'DELETE' }))}>删除</button></div></div>)}</div> }
+function AdminReports({ items, run, load }) {
+  const statusText = { open:'待处理', reviewing:'处理中', resolved:'已处理', rejected:'已驳回' }
+  async function setStatus(r, status) {
+    const note = status === 'rejected' ? (prompt('驳回原因/处理备注', '已查看，暂不处理') || '') : (prompt('处理备注（可留空）', '') || '')
+    await run(() => api(`/api/admin/reports/${r.id}`, { method:'PATCH', body: JSON.stringify({ status, admin_note: note }) }))
+  }
+  return <div className="admin-card"><div className="admin-card-head"><h3><i className="fas fa-flag" /> 举报处理</h3><div className="admin-actions"><button className="btn btn-sm btn-secondary" onClick={() => load('reports')}>刷新</button></div></div>
+    {!items.length && <div className="empty-state"><i className="fas fa-shield-check" /><p>暂无待处理举报</p></div>}
+    {items.map(r => <div className="admin-row report-row" key={r.id}>
+      <div><b>{r.target_type === 'post' ? '帖子' : '评论'}举报 #{r.id} <span className={`report-status ${r.status}`}>{statusText[r.status] || r.status}</span></b><p>{r.reason} · 举报人 {r.reporter} · 内容作者 {r.target_author || '未知'} · {relativeTime(r.created_at)}</p><small>来自《{r.post_title || '未知帖子'}》：{htmlText(r.target_preview || '').slice(0, 140)}</small>{r.detail && <small className="report-detail">补充：{r.detail}</small>}{r.admin_note && <small className="report-detail">处理备注：{r.admin_note}</small>}</div>
+      <div className="admin-actions"><a className="btn btn-sm btn-secondary" href={`/post/${r.post_id}${r.target_type === 'comment' ? `#comment-${r.target_id}` : ''}`}>查看</a><button className="btn btn-sm btn-secondary" onClick={() => setStatus(r, 'reviewing')}>标记处理中</button><button className="btn btn-sm btn-secondary" onClick={() => setStatus(r, 'rejected')}>驳回</button><button className="btn btn-sm btn-danger" onClick={() => confirm('确认删除被举报内容并关闭举报？') && run(() => api(`/api/admin/reports/${r.id}/target`, { method:'DELETE' }))}>删除内容</button><button className="btn btn-sm btn-primary" onClick={() => setStatus(r, 'resolved')}>标记已处理</button></div>
+    </div>)}
+  </div>
+}
 function AdminUsers({ items, run }) {
   const [info, setInfo] = useState(null)
   const [loadingInfo, setLoadingInfo] = useState(false)
