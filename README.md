@@ -1,6 +1,7 @@
 # 泓聊社区 Clone
 
 一个可运行的社区论坛全栈项目：React 前端 + FastAPI 后端 + SQLite 本地数据库。项目包含社区首页、帖子、评论、用户、搜索、公告、捐赠者展示等基础功能。
+<img width="1276" height="673" alt="image" src="https://github.com/user-attachments/assets/e99e3161-e3dc-4bbe-8783-3e78b8477e3e" />
 
 ## 功能
 
